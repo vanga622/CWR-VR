@@ -27,6 +27,23 @@ struct VRConfig
     float hudHalfWidthTan = 0.6f; // horizontal half-size of the HUD as tan(angle)
     float screenDistance = 2.5f; // flat virtual screen, metres
     float screenWidth = 3.2f;    // flat virtual screen, metres (16:9)
+    float smoothTurn = 0.0f;     // 0 = snap turn, 1 = smooth turn
+    float snapAngle = 30.0f;     // degrees per snap
+    float smoothSpeed = 120.0f;  // degrees per second at full stick
+    float headLocomotion = 1.0f; // 1 = left stick moves where you look, 0 = where the body faces
+};
+
+// Controller state from the OpenXR actions (Touch layout), refreshed every
+// frame while the session has input focus; all zero otherwise.
+struct ControllerState
+{
+    bool active = false;
+    float moveX = 0, moveY = 0; // left thumbstick, +Y = forward
+    float turnX = 0, turnY = 0; // right thumbstick
+    float trigger[2] = {0, 0};  // [0] left hand, [1] right hand
+    float grip[2] = {0, 0};
+    bool a = false, b = false, x = false, y = false, menu = false;
+    bool thumbClick[2] = {false, false};
 };
 
 // Swapchain image the backend must fill with the current flat frame.
@@ -81,6 +98,13 @@ public:
     // effect on the next start (swapchains are sized once).
     bool ReloadConfigIfChanged();
     void SaveConfig();
+
+    // Latest controller state (synced with each Begin*Frame).
+    const ControllerState& Controllers() const;
+
+    // One line in vr.log, for VR events decided outside this library
+    // (recentre, heading re-sync).
+    void LogLine(const char* text);
 
     // Flat frame, once per presented frame before SwapWindow: polls runtime
     // events and, while the session runs, waits for/begins an XR frame.

@@ -5,11 +5,17 @@
 # graphics backend fills the swapchain images it hands out.
 
 add_library(PoseidonVR STATIC
+    VRGamepad.cpp
+    VRGamepad.hpp
     VRSession.cpp
     VRSession.hpp
 )
 
 target_include_directories(PoseidonVR PUBLIC ${CMAKE_SOURCE_DIR}/engine)
+
+# Virtual gamepad for the controllers (VRGamepad).
+find_package(SDL3 CONFIG REQUIRED)
+target_link_libraries(PoseidonVR PRIVATE SDL3::SDL3)
 
 if(WIN32)
     find_package(OpenXR CONFIG REQUIRED)

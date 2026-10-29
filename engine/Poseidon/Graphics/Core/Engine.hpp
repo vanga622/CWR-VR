@@ -386,6 +386,9 @@ class Engine : public IGraphicsEngine
     virtual int VRScenePassCount() { return 1; }
     virtual void VRBeginScenePass(int /*pass*/, Camera& /*camera*/) {}
     virtual void VRBeginHUDPass(Camera& /*camera*/) {}
+    // VR: world-space direction the player aims with (the head for now),
+    // replacing the mouse cursor; false when not in VR.
+    virtual bool VRAimDirection(Vector3& /*dir*/) const { return false; }
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

@@ -12,6 +12,12 @@
 //   SubmitVRFrame      eyes -> eye swapchains, window frame -> HUD swapchain
 // Frames that never reach VRScenePassCount (loading, splash) go to the flat
 // virtual screen instead (M1).
+//
+// Heading (M3): VR owns the view heading (s_playerYaw), turned by the right
+// stick, and the game aims where the head looks (VRAimDirection), so the
+// soldier turns after the player instead of the other way round.  The view
+// re-syncs to the game camera when they stay far apart (cutscene, respawn,
+// vehicle).  Controllers reach the game as a virtual gamepad (VRGamepad).
 
 #include <PoseidonGL33/EngineGL33.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
@@ -19,9 +25,12 @@
 #include <Poseidon/Graphics/Core/GLClear.hpp>
 #include <Poseidon/Graphics/Core/GLPipelineState.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
+#include <PoseidonVR/VRGamepad.hpp>
 #include <PoseidonVR/VRSession.hpp>
 
 #include <SDL3/SDL.h>
+#include <chrono>
+#include <cmath>
 #include <glad/gl.h>
 // The engine's DebugLog macro collides with ImGui::DebugLog; this TU does not
 // use the macro (same as DebugOverlay.cpp).
@@ -58,6 +67,117 @@ float s_near = 0.1f;
 float s_far = 1000.0f;
 float s_hudTanX = 0.6f;
 float s_hudTanY = 0.34f;
+
+// Heading and controllers (M3).
+PoseidonVR::VRGamepad s_gamepad;
+bool s_yawValid = false;     // false until the first stereo frame
+float s_playerYaw = 0.0f;    // world heading of the tracking space's forward, radians
+Vector3 s_headOrigin(0, 0, 0); // tracking-space head position placed at the game camera
+float s_moveYaw = 0.0f;      // view heading minus game heading (head-relative walking)
+float s_mismatchTime = 0.0f; // how long view and game camera have disagreed
+bool s_snapArmed = true;
+bool s_recentreHeld = false;
+bool s_aimValid = false;
+Vector3 s_aimDir(0, 0, 1);
+std::chrono::steady_clock::time_point s_lastTurnTime;
+
+constexpr float kDegToRad = 3.14159265f / 180.0f;
+
+// Heading (radians, clockwise from +Z) of a frame, from its aside vector so
+// it stays defined when looking straight up or down.
+float HeadingOf(const Matrix3& m)
+{
+    Vector3Val aside = m.DirectionAside();
+    return std::atan2(-aside.Z(), aside.X());
+}
+
+Matrix3 YawMatrix(float heading)
+{
+    Matrix3 m;
+    m.SetUpAndDirection(VUp, Vector3(std::sin(heading), 0, std::cos(heading)));
+    return m;
+}
+
+float WrapAngle(float a)
+{
+    while (a > 3.14159265f)
+        a -= 2 * 3.14159265f;
+    while (a < -3.14159265f)
+        a += 2 * 3.14159265f;
+    return a;
+}
+
+// Right stick turning, recentre (right stick click) and re-sync with the
+// game camera.  Runs once per stereo frame, before the eyes are placed.
+void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw)
+{
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - s_lastTurnTime).count();
+    s_lastTurnTime = now;
+    if (dt > 0.1f)
+        dt = 0.1f;
+
+    auto& vr = PoseidonVR::VRSession::Instance();
+    const PoseidonVR::VRConfig& cfg = vr.Config();
+    const PoseidonVR::ControllerState& c = vr.Controllers();
+
+    const bool recentre = c.thumbClick[1] && !s_recentreHeld;
+    s_recentreHeld = c.thumbClick[1];
+    if (!s_yawValid || recentre)
+    {
+        // Current view straight down the game camera, head at its position.
+        s_playerYaw = gameYaw - headYaw;
+        s_headOrigin = headPos;
+        s_yawValid = true;
+        s_mismatchTime = 0.0f;
+        LOG_INFO(Graphics, "VR: recentred");
+        vr.LogLine(recentre ? "Recentred (right stick click)" : "Recentred (first stereo frame)");
+    }
+
+    if (c.active)
+    {
+        const float x = c.turnX;
+        if (cfg.smoothTurn >= 0.5f)
+        {
+            if (std::fabs(x) > 0.15f)
+                s_playerYaw += x * cfg.smoothSpeed * kDegToRad * dt;
+        }
+        else if (s_snapArmed && std::fabs(x) > 0.7f)
+        {
+            s_playerYaw += (x > 0 ? 1.0f : -1.0f) * cfg.snapAngle * kDegToRad;
+            s_snapArmed = false;
+        }
+        else if (std::fabs(x) < 0.3f)
+        {
+            s_snapArmed = true;
+        }
+    }
+    s_playerYaw = WrapAngle(s_playerYaw);
+
+    // The soldier follows the head within a moment; a view that stays far
+    // from the game camera means the game moved it (cutscene, respawn,
+    // getting into a vehicle).  Follow the game then.
+    const float diff = WrapAngle(gameYaw - (s_playerYaw + headYaw));
+    if (std::fabs(diff) > 75.0f * kDegToRad)
+    {
+        s_mismatchTime += dt;
+        if (s_mismatchTime > 1.0f)
+        {
+            s_playerYaw = WrapAngle(s_playerYaw + diff);
+            s_mismatchTime = 0.0f;
+            LOG_INFO(Graphics, "VR: view re-synced to the game camera ({:.0f} deg)", diff / kDegToRad);
+            char line[96];
+            std::snprintf(line, sizeof(line), "View re-synced to the game camera (%.0f deg)", diff / kDegToRad);
+            vr.LogLine(line);
+        }
+    }
+    else
+    {
+        s_mismatchTime = 0.0f;
+    }
+
+    s_moveYaw = cfg.headLocomotion >= 0.5f ? WrapAngle(s_playerYaw + headYaw - gameYaw) : 0.0f;
+}
 
 void DestroyEyeTarget(EyeTarget& t)
 {
@@ -209,6 +329,23 @@ void DrawVRTab()
     ImGui::SliderFloat("Screen distance (m)", &c.screenDistance, 1.0f, 10.0f, "%.2f");
     ImGui::SliderFloat("Screen width (m)", &c.screenWidth, 1.0f, 10.0f, "%.2f");
 
+    ImGui::SeparatorText("Controls");
+    bool smooth = c.smoothTurn >= 0.5f;
+    if (ImGui::Checkbox("Smooth turn", &smooth))
+        c.smoothTurn = smooth ? 1.0f : 0.0f;
+    if (smooth)
+        ImGui::SliderFloat("Turn speed (deg/s)", &c.smoothSpeed, 30.0f, 360.0f, "%.0f");
+    else
+        ImGui::SliderFloat("Snap angle (deg)", &c.snapAngle, 10.0f, 90.0f, "%.0f");
+    bool headMove = c.headLocomotion >= 0.5f;
+    if (ImGui::Checkbox("Walk where I look", &headMove))
+        c.headLocomotion = headMove ? 1.0f : 0.0f;
+    const PoseidonVR::ControllerState& pad = vr.Controllers();
+    ImGui::TextDisabled("Sticks L %.2f %.2f  R %.2f %.2f  Triggers %.2f %.2f  Grips %.2f %.2f%s", pad.moveX,
+                        pad.moveY, pad.turnX, pad.turnY, pad.trigger[0], pad.trigger[1], pad.grip[0], pad.grip[1],
+                        pad.active ? "" : "  (no input focus)");
+    ImGui::TextDisabled("Right stick click: recentre");
+
     ImGui::SeparatorText("Render");
     ImGui::SliderFloat("Eye scale", &c.eyeScale, 0.3f, 1.5f, "%.2f");
     if (ImGui::IsItemHovered())
@@ -237,6 +374,13 @@ void EngineGL33::InitVR()
     }
     s_mirror = cfg.IsVRMirror();
     Poseidon::Dev::DebugOverlay::SetExtraTab("VR", DrawVRTab);
+    if (!vr.IsFake())
+    {
+        if (s_gamepad.Create())
+            LOG_INFO(Graphics, "VR: controllers attached as a virtual gamepad");
+        else
+            LOG_WARN(Graphics, "VR: virtual gamepad failed ({}), controllers unavailable", SDL_GetError());
+    }
     // xrWaitFrame paces the loop from now on (see SetSwapInterval).
     if (!vr.IsFake())
         SDL_GL_SetSwapInterval(0);
@@ -247,6 +391,8 @@ void EngineGL33::ShutdownVR()
 {
     if (_vrActive)
         Poseidon::Dev::DebugOverlay::SetExtraTab(nullptr, nullptr);
+    s_gamepad.Destroy();
+    s_aimValid = false;
     for (EyeTarget& t : s_eyes)
         DestroyEyeTarget(t);
     if (_vrBlitFbo)
@@ -269,7 +415,11 @@ int EngineGL33::VRScenePassCount()
 
     _vrFrameAttempted = true;
     if (!PoseidonVR::VRSession::Instance().BeginStereoFrame(s_frame))
+    {
+        // No head pose this frame: leave aiming to the mouse.
+        s_aimValid = false;
         return 1;
+    }
     // The XR frame is begun: from here it is submitted in SubmitVRFrame even
     // if an eye target fails (that eye then shows nothing).
     for (EyeTarget& t : s_eyes)
@@ -288,12 +438,13 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         s_gameCamera = camera.Transform();
         s_near = camera.Near();
         s_far = camera.Far();
-        // Head tracking replaces the game's pitch and roll; only the body's
-        // heading is kept, so mouse pitch never tilts the world.  Heading
-        // from the aside vector (dir = aside x up), which stays horizontal
-        // even when the game camera looks straight up or down.
-        Vector3Val aside = s_gameCamera.DirectionAside();
-        s_bodyYaw.SetUpAndDirection(VUp, Vector3(-aside.Z(), 0, aside.X()));
+        // The game camera gives the position; the heading is VR's own
+        // (UpdateHeading) and pitch/roll come from the head, so the mouse
+        // never tilts the world.
+        const auto& eyes = s_frame.eyes;
+        const Vector3 headPos = (ToEnginePosition(eyes[0].position) + ToEnginePosition(eyes[1].position)) * 0.5f;
+        UpdateHeading(HeadingOf(ToEngineOrientation(eyes[0].orientation)), headPos, HeadingOf(s_gameCamera.Orientation()));
+        s_bodyYaw = YawMatrix(s_playerYaw);
     }
 
     // Whatever is still queued belongs to the previous target.
@@ -301,7 +452,7 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
     FlushAndFreeAllQueues(_queueNo);
 
     const PoseidonVR::EyeView& eye = s_frame.eyes[pass];
-    PlaceCamera(camera, ToEngineOrientation(eye.orientation), ToEnginePosition(eye.position));
+    PlaceCamera(camera, ToEngineOrientation(eye.orientation), ToEnginePosition(eye.position) - s_headOrigin);
     camera.SetPerspective(s_near, s_far, 1.0f, 1.0f);
     camera.SetAsymmetricFrustum(eye.tanLeft, eye.tanRight, eye.tanDown, eye.tanUp);
     camera.Adjust(this);
@@ -334,9 +485,22 @@ void EngineGL33::VRBeginHUDPass(Camera& camera)
                              (eyes[0].position[2] + eyes[1].position[2]) * 0.5f};
     s_hudTanX = PoseidonVR::VRSession::Instance().Config().hudHalfWidthTan;
     s_hudTanY = _w > 0 ? s_hudTanX * _h / _w : s_hudTanX;
-    PlaceCamera(camera, ToEngineOrientation(eyes[0].orientation), ToEnginePosition(centre));
+    const Matrix3 head = ToEngineOrientation(eyes[0].orientation);
+    PlaceCamera(camera, head, ToEnginePosition(centre) - s_headOrigin);
     camera.SetPerspective(s_near, s_far, s_hudTanX, s_hudTanY);
     camera.Adjust(this);
+
+    // The game aims along the view (read back by World next frame).
+    s_aimDir = (s_bodyYaw * head).Direction();
+    s_aimValid = true;
+}
+
+bool EngineGL33::VRAimDirection(Vector3& dir) const
+{
+    if (!_vrActive || !s_aimValid)
+        return false;
+    dir = s_aimDir;
+    return true;
 }
 
 void EngineGL33::BindVREyeTarget()
@@ -356,7 +520,10 @@ void EngineGL33::SubmitVRFrame()
 {
     if (!_vrActive)
         return;
-    PoseidonVR::VRSession::Instance().ReloadConfigIfChanged();
+    auto& vr = PoseidonVR::VRSession::Instance();
+    vr.ReloadConfigIfChanged();
+    // Read by the engine's input pass at the start of the next frame.
+    s_gamepad.Update(vr.Controllers(), s_moveYaw);
     if (_vrStereoFrame)
         SubmitVRStereoFrame();
     else if (!_vrFrameAttempted)

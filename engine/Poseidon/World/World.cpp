@@ -934,6 +934,11 @@ void World::Simulate(float deltaT, bool& enableDraw)
                         cursorDir += curCam;
                         cursorDir.Normalize();
 
+                        // VR: aim where the player looks (controller aim in M4).
+                        Vector3 vrAim;
+                        if (GEngine->VRAimDirection(vrAim))
+                            cursorDir = vrAim;
+
                         cameraVehicle->LimitCursorHard(_camType, cursorDir);
                         cursorDir.Normalize();
 

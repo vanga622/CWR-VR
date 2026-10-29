@@ -114,6 +114,11 @@ const ConfigKey kConfigKeys[] = {
     {"hud", "half_width_tan", &VRConfig::hudHalfWidthTan, "horizontal half-size as tan(angle); 0.6 = 31 deg"},
     {"screen", "distance", &VRConfig::screenDistance, "flat virtual screen (menus, loading), metres"},
     {"screen", "width", &VRConfig::screenWidth, "flat virtual screen width, metres (16:9)"},
+    {"controls", "smooth_turn", &VRConfig::smoothTurn, "right stick turning: 0 = snap, 1 = smooth"},
+    {"controls", "snap_angle", &VRConfig::snapAngle, "degrees per snap turn"},
+    {"controls", "smooth_speed", &VRConfig::smoothSpeed, "smooth turn speed, degrees per second"},
+    {"controls", "head_locomotion", &VRConfig::headLocomotion,
+     "1 = left stick moves where you look, 0 = where the body faces"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -193,6 +198,7 @@ void LoadConfig()
 // --- Fake headset -------------------------------------------------------------
 
 bool s_fake = false;
+ControllerState s_controllers;
 constexpr int kFakeEyeSize = 1440;
 
 void FillFakeFrame(StereoFrame& out)
@@ -252,6 +258,14 @@ struct State
     XrEnvironmentBlendMode blendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     XrSessionState sessionState = XR_SESSION_STATE_UNKNOWN;
     bool running = false;
+
+    // Controller actions (one "gameplay" set, attached once).
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrPath hands[2] = {XR_NULL_PATH, XR_NULL_PATH};
+    XrAction move = XR_NULL_HANDLE, turn = XR_NULL_HANDLE;
+    XrAction trigger = XR_NULL_HANDLE, grip = XR_NULL_HANDLE, thumbClick = XR_NULL_HANDLE;
+    XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE, btnY = XR_NULL_HANDLE;
+    XrAction menu = XR_NULL_HANDLE;
     bool frameBegun = false;
     XrTime predictedDisplayTime = 0;
 
@@ -509,8 +523,178 @@ bool CreateSpace(XrReferenceSpaceType type, XrSpace& out, const char* what)
     return Check(xrCreateReferenceSpace(s.session, &rsi, &out), what);
 }
 
+XrPath ToPath(const char* str)
+{
+    XrPath path = XR_NULL_PATH;
+    xrStringToPath(s.instance, str, &path);
+    return path;
+}
+
+bool CreateAction(XrAction& action, const char* name, const char* localized, XrActionType type, bool bothHands)
+{
+    XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+    info.actionType = type;
+    std::strncpy(info.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(info.localizedActionName, localized, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    if (bothHands)
+    {
+        info.countSubactionPaths = 2;
+        info.subactionPaths = s.hands;
+    }
+    return Check(xrCreateAction(s.actionSet, &info, &action), name);
+}
+
+struct Binding
+{
+    XrAction* action;
+    const char* path;
+};
+
+void SuggestBindings(const char* profile, const std::vector<Binding>& bindings)
+{
+    std::vector<XrActionSuggestedBinding> suggested;
+    for (const auto& b : bindings)
+        suggested.push_back({*b.action, ToPath(b.path)});
+    XrInteractionProfileSuggestedBinding info{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    info.interactionProfile = ToPath(profile);
+    info.countSuggestedBindings = static_cast<uint32_t>(suggested.size());
+    info.suggestedBindings = suggested.data();
+    if (Check(xrSuggestInteractionProfileBindings(s.instance, &info), profile))
+        Log("Bindings suggested for %s", profile);
+}
+
+// Touch layout; the game sees it as a gamepad (see VRGamepad).
+bool CreateActions()
+{
+    XrActionSetCreateInfo asci{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(asci.actionSetName, "gameplay", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(asci.localizedActionSetName, "Gameplay", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    if (!Check(xrCreateActionSet(s.instance, &asci, &s.actionSet), "xrCreateActionSet"))
+        return false;
+    s.hands[0] = ToPath("/user/hand/left");
+    s.hands[1] = ToPath("/user/hand/right");
+
+    if (!CreateAction(s.move, "move", "Move", XR_ACTION_TYPE_VECTOR2F_INPUT, false) ||
+        !CreateAction(s.turn, "turn", "Turn", XR_ACTION_TYPE_VECTOR2F_INPUT, false) ||
+        !CreateAction(s.trigger, "trigger", "Trigger", XR_ACTION_TYPE_FLOAT_INPUT, true) ||
+        !CreateAction(s.grip, "grip", "Grip", XR_ACTION_TYPE_FLOAT_INPUT, true) ||
+        !CreateAction(s.thumbClick, "thumb_click", "Thumbstick click", XR_ACTION_TYPE_BOOLEAN_INPUT, true) ||
+        !CreateAction(s.btnA, "button_a", "A", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
+        !CreateAction(s.btnB, "button_b", "B", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
+        !CreateAction(s.btnX, "button_x", "X", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
+        !CreateAction(s.btnY, "button_y", "Y", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
+        !CreateAction(s.menu, "menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, false))
+        return false;
+
+    const std::vector<Binding> common = {
+        {&s.move, "/user/hand/left/input/thumbstick"},
+        {&s.turn, "/user/hand/right/input/thumbstick"},
+        {&s.trigger, "/user/hand/left/input/trigger/value"},
+        {&s.trigger, "/user/hand/right/input/trigger/value"},
+        {&s.grip, "/user/hand/left/input/squeeze/value"},
+        {&s.grip, "/user/hand/right/input/squeeze/value"},
+        {&s.thumbClick, "/user/hand/left/input/thumbstick/click"},
+        {&s.thumbClick, "/user/hand/right/input/thumbstick/click"},
+        {&s.btnA, "/user/hand/right/input/a/click"},
+        {&s.btnB, "/user/hand/right/input/b/click"},
+    };
+    std::vector<Binding> touch = common;
+    touch.push_back({&s.btnX, "/user/hand/left/input/x/click"});
+    touch.push_back({&s.btnY, "/user/hand/left/input/y/click"});
+    touch.push_back({&s.menu, "/user/hand/left/input/menu/click"});
+    SuggestBindings("/interaction_profiles/oculus/touch_controller", touch);
+
+    // Index: the left A/B stand in for X/Y; its menu button is the system's.
+    std::vector<Binding> index = common;
+    index.push_back({&s.btnX, "/user/hand/left/input/a/click"});
+    index.push_back({&s.btnY, "/user/hand/left/input/b/click"});
+    SuggestBindings("/interaction_profiles/valve/index_controller", index);
+
+    XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attach.countActionSets = 1;
+    attach.actionSets = &s.actionSet;
+    return Check(xrAttachSessionActionSets(s.session, &attach), "xrAttachSessionActionSets");
+}
+
+void LogInteractionProfiles()
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        XrInteractionProfileState st{XR_TYPE_INTERACTION_PROFILE_STATE};
+        if (XR_FAILED(xrGetCurrentInteractionProfile(s.session, s.hands[i], &st)))
+            continue;
+        char name[XR_MAX_PATH_LENGTH] = "none";
+        uint32_t len = 0;
+        if (st.interactionProfile != XR_NULL_PATH)
+            xrPathToString(s.instance, st.interactionProfile, sizeof(name), &len, name);
+        Log("Controller %s: %s", i == 0 ? "left" : "right", name);
+    }
+}
+
+float ActionFloat(XrAction action, XrPath hand)
+{
+    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+    gi.action = action;
+    gi.subactionPath = hand;
+    XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT};
+    return XR_SUCCEEDED(xrGetActionStateFloat(s.session, &gi, &st)) && st.isActive ? st.currentState : 0.0f;
+}
+
+bool ActionBool(XrAction action, XrPath hand = XR_NULL_PATH)
+{
+    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+    gi.action = action;
+    gi.subactionPath = hand;
+    XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+    return XR_SUCCEEDED(xrGetActionStateBoolean(s.session, &gi, &st)) && st.isActive && st.currentState;
+}
+
+void ActionVector(XrAction action, float& x, float& y)
+{
+    XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+    gi.action = action;
+    XrActionStateVector2f st{XR_TYPE_ACTION_STATE_VECTOR2F};
+    const bool ok = XR_SUCCEEDED(xrGetActionStateVector2f(s.session, &gi, &st)) && st.isActive;
+    x = ok ? st.currentState.x : 0.0f;
+    y = ok ? st.currentState.y : 0.0f;
+}
+
+// Input only flows while the session has focus (not behind the runtime's
+// own menus).
+void SyncControllers()
+{
+    s_controllers = ControllerState{};
+    if (s.actionSet == XR_NULL_HANDLE || s.sessionState != XR_SESSION_STATE_FOCUSED)
+        return;
+    XrActiveActionSet active{s.actionSet, XR_NULL_PATH};
+    XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    if (XR_FAILED(xrSyncActions(s.session, &sync)))
+        return;
+
+    ControllerState& c = s_controllers;
+    c.active = true;
+    ActionVector(s.move, c.moveX, c.moveY);
+    ActionVector(s.turn, c.turnX, c.turnY);
+    for (int i = 0; i < 2; ++i)
+    {
+        c.trigger[i] = ActionFloat(s.trigger, s.hands[i]);
+        c.grip[i] = ActionFloat(s.grip, s.hands[i]);
+        c.thumbClick[i] = ActionBool(s.thumbClick, s.hands[i]);
+    }
+    c.a = ActionBool(s.btnA);
+    c.b = ActionBool(s.btnB);
+    c.x = ActionBool(s.btnX);
+    c.y = ActionBool(s.btnY);
+    c.menu = ActionBool(s.menu);
+}
+
 void DestroyAll()
 {
+    if (s.actionSet != XR_NULL_HANDLE)
+        xrDestroyActionSet(s.actionSet); // also destroys its actions
+    s_controllers = ControllerState{};
     for (Swapchain* sc : {&s.screen, &s.hud, &s.eyes[0], &s.eyes[1]})
         if (sc->handle != XR_NULL_HANDLE)
             xrDestroySwapchain(sc->handle);
@@ -573,6 +757,12 @@ void PollEvents()
                 Log("Instance loss pending; VR disabled for the rest of this run");
                 DestroyAll();
                 return;
+            case XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED:
+                LogInteractionProfiles();
+                break;
+            case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
+                Log("Runtime recentred the reference space");
+                break;
             case XR_TYPE_EVENT_DATA_EVENTS_LOST:
                 Log("WARNING: %u runtime events lost",
                     reinterpret_cast<XrEventDataEventsLost&>(ev).lostEventCount);
@@ -589,6 +779,7 @@ void PollEvents()
 bool WaitAndBeginFrame(bool stereo)
 {
     PollEvents();
+    SyncControllers();
     if (!s.running)
         return false;
 
@@ -714,6 +905,16 @@ VRConfig& VRSession::MutableConfig()
     return s_config;
 }
 
+const ControllerState& VRSession::Controllers() const
+{
+    return s_controllers;
+}
+
+void VRSession::LogLine(const char* text)
+{
+    Log("%s", text);
+}
+
 bool VRSession::ReloadConfigIfChanged()
 {
     const auto now = std::chrono::steady_clock::now();
@@ -807,7 +1008,7 @@ bool VRSession::Init()
     LogReferenceSpaces();
     if (!CreateSpace(XR_REFERENCE_SPACE_TYPE_LOCAL, s.localSpace, "xrCreateReferenceSpace(LOCAL)") ||
         !CreateSpace(XR_REFERENCE_SPACE_TYPE_VIEW, s.viewSpace, "xrCreateReferenceSpace(VIEW)") ||
-        !CreateSwapchains())
+        !CreateSwapchains() || !CreateActions())
     {
         DestroyAll();
         return false;
