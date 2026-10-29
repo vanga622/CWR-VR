@@ -901,6 +901,8 @@ void World::Simulate(float deltaT, bool& enableDraw)
         {
             fov = _camFOV[_camType];
             transform = cameraVehicle->Transform();
+            // VR: walking and turning are relative to this body.
+            GEngine->VRSetPlayerBody(cameraVehicle, cameraVehicle->Orientation());
             // if any vehicle control key is pressed, set to manual control
             // check vehicle control keys
 

@@ -103,6 +103,8 @@ class InputSubsystem
 
     // Cursor position reset
     void ResetCursorPosition();
+    // VR: place the UI cursor where the controller points (-1..+1, y down).
+    void SetPointerCursor(float x, float y);
     void FlushAndResetMouse();
 
     // Packed key queries (INPUT_DEVICE_* | code format)

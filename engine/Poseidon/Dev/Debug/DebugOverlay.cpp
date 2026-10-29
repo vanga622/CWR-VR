@@ -82,6 +82,7 @@ bool s_selectMemoryTab = false;  // one-shot: force-select the Memory tab next d
 // VR: backend-provided extra tab (SetExtraTab).
 const char* s_extraTabName = nullptr;
 void (*s_extraTabDraw)() = nullptr;
+unsigned int s_renderTarget = 0; // VR: framebuffer Render() draws into
 SDL_Window* s_window = nullptr;
 // Saved mouse-grab state while the dev panel holds the cursor released.
 bool s_mouseReleasedByPanel = false;
@@ -1782,7 +1783,8 @@ void Render()
     // Make sure we draw to the default framebuffer in case the engine left
     // an FBO bound — happens with post-FX in GL33.  Other state (blend,
     // scissor, vao, depth) is saved/restored inside RenderDrawData.
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    // VR: or to the HUD target the backend asked for (SetRenderTarget).
+    glBindFramebuffer(GL_FRAMEBUFFER, s_renderTarget);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     // Drain deferred actions queued by UI click handlers.  See the
@@ -1825,6 +1827,10 @@ void SetExtraTab(const char* name, void (*draw)())
 {
     s_extraTabName = name;
     s_extraTabDraw = name ? draw : nullptr;
+}
+void SetRenderTarget(unsigned int framebuffer)
+{
+    s_renderTarget = framebuffer;
 }
 
 void RequestDeferredReload(const char* modPath)

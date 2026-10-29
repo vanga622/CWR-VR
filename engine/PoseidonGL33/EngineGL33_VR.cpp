@@ -24,6 +24,7 @@
 #include <Poseidon/Foundation/Platform/AppConfig.hpp>
 #include <Poseidon/Graphics/Core/GLClear.hpp>
 #include <Poseidon/Graphics/Core/GLPipelineState.hpp>
+#include <Poseidon/Input/InputSubsystem.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
 #include <PoseidonVR/VRGamepad.hpp>
 #include <PoseidonVR/VRSession.hpp>
@@ -73,10 +74,18 @@ PoseidonVR::VRGamepad s_gamepad;
 bool s_yawValid = false;     // false until the first stereo frame
 float s_playerYaw = 0.0f;    // world heading of the tracking space's forward, radians
 Vector3 s_headOrigin(0, 0, 0); // tracking-space head position placed at the game camera
-float s_moveYaw = 0.0f;      // view heading minus game heading (head-relative walking)
-float s_mismatchTime = 0.0f; // how long view and game camera have disagreed
+float s_moveYaw = 0.0f;      // view heading minus body heading (head-relative walking)
 bool s_snapArmed = true;
+
+// The player's body this frame (Engine::VRSetPlayerBody), and what the last
+// stereo frame saw, to tell a cut (respawn, vehicle, cutscene, teleport)
+// from ordinary turning.
+const void* s_bodyId = nullptr;
+float s_bodyHeading = 0.0f;
+const void* s_lastBodyId = nullptr;
+Vector3 s_lastCameraPos(0, 0, 0);
 bool s_recentreHeld = false;
+int s_recentreCount = 0; // bumped by every recentre (standing height restarts)
 bool s_aimValid = false;
 Vector3 s_aimDir(0, 0, 1);
 std::chrono::steady_clock::time_point s_lastTurnTime;
@@ -109,7 +118,12 @@ float WrapAngle(float a)
 
 // Right stick turning, recentre (right stick click) and re-sync with the
 // game camera.  Runs once per stereo frame, before the eyes are placed.
-void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw)
+//
+// Re-sync only on a cut: another body (respawn, unit switch, vehicle in or
+// out, a cutscene camera) or the camera jumping in one frame (teleport).
+// Ordinary turning never re-syncs: the soldier may lag behind a fast real
+// turn, but the view stays the player's.
+void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const Vector3& cameraPos)
 {
     const auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - s_lastTurnTime).count();
@@ -129,7 +143,7 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw)
         s_playerYaw = gameYaw - headYaw;
         s_headOrigin = headPos;
         s_yawValid = true;
-        s_mismatchTime = 0.0f;
+        ++s_recentreCount;
         LOG_INFO(Graphics, "VR: recentred");
         vr.LogLine(recentre ? "Recentred (right stick click)" : "Recentred (first stereo frame)");
     }
@@ -154,34 +168,43 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw)
     }
     s_playerYaw = WrapAngle(s_playerYaw);
 
-    // The soldier follows the head within a moment; a view that stays far
-    // from the game camera means the game moved it (cutscene, respawn,
-    // getting into a vehicle).  Follow the game then.
-    const float diff = WrapAngle(gameYaw - (s_playerYaw + headYaw));
-    if (std::fabs(diff) > 75.0f * kDegToRad)
+    const bool bodyChanged = s_bodyId != s_lastBodyId;
+    const float jump = (cameraPos - s_lastCameraPos).Size();
+    if (bodyChanged || jump > 10.0f) // 10 m in one frame: faster than any vehicle
     {
-        s_mismatchTime += dt;
-        if (s_mismatchTime > 1.0f)
-        {
-            s_playerYaw = WrapAngle(s_playerYaw + diff);
-            s_mismatchTime = 0.0f;
-            LOG_INFO(Graphics, "VR: view re-synced to the game camera ({:.0f} deg)", diff / kDegToRad);
-            char line[96];
-            std::snprintf(line, sizeof(line), "View re-synced to the game camera (%.0f deg)", diff / kDegToRad);
-            vr.LogLine(line);
-        }
+        const float diff = WrapAngle(gameYaw - (s_playerYaw + headYaw));
+        s_playerYaw = WrapAngle(gameYaw - headYaw);
+        char line[128];
+        std::snprintf(line, sizeof(line), "View re-synced to the game camera (%s, %.0f deg)",
+                      bodyChanged ? "new body" : "camera jump", diff / kDegToRad);
+        LOG_INFO(Graphics, "VR: {}", line);
+        vr.LogLine(line);
     }
-    else
-    {
-        s_mismatchTime = 0.0f;
-    }
+    s_lastBodyId = s_bodyId;
+    s_lastCameraPos = cameraPos;
 
-    s_moveYaw = cfg.headLocomotion >= 0.5f ? WrapAngle(s_playerYaw + headYaw - gameYaw) : 0.0f;
+    // The game moves the soldier relative to its body; turn the stick from
+    // the view (or keep it on the body) accordingly.
+    const float bodyYaw = s_bodyId ? s_bodyHeading : gameYaw;
+    s_moveYaw = cfg.headLocomotion >= 0.5f ? WrapAngle(s_playerYaw + headYaw - bodyYaw) : 0.0f;
 }
 
 // Weapon in the right hand (M4).
 bool s_weaponValid = false;
+bool s_twoHanded = false;
 Matrix4 s_weaponWorld;
+
+// Physical stance (M5): head drop below the player's standing height, and
+// the vertical shift that maps the real head height onto the soldier.
+bool s_headDropValid = false;
+float s_headDrop = 0.0f;
+float s_standY = 0.0f;  // highest head height since recentre = standing
+bool s_gameProne = false; // the soldier lies (Engine::VRSetProne)
+float s_verticalShift = 0.0f;
+float s_horizontalShift[2] = {0.0f, 0.0f}; // x, z: keeps the body under the head
+
+// Menu pointer (M5): right controller ray -> UI cursor, trigger -> click.
+bool s_pointerDown = false;
 
 
 void DestroyEyeTarget(EyeTarget& t)
@@ -273,10 +296,176 @@ void PlaceCamera(Camera& camera, const Matrix3& headOrientation, const Vector3& 
     camera.SetTransform(t);
 }
 
+// Tracking-space position -> offset from the game camera (before heading).
+Vector3 TrackedOffset(const float p[3])
+{
+    Vector3 offset = ToEnginePosition(p) - s_headOrigin;
+    offset[0] += s_horizontalShift[0];
+    offset[1] += s_verticalShift;
+    offset[2] += s_horizontalShift[1];
+    return offset;
+}
+
 // Tracking-space position -> world, the same mapping the eyes use.
 Vector3 TrackedToWorld(const float p[3])
 {
-    return s_gameCamera.Position() + s_bodyYaw * (ToEnginePosition(p) - s_headOrigin);
+    return s_gameCamera.Position() + s_bodyYaw * TrackedOffset(p);
+}
+
+// Head height for the physical stance.  Standing height is the highest the
+// head has been since recentre, so it calibrates itself the moment the
+// player stands straight (and a recentre done while bent over does not
+// leave him "crouched").  Standing soldier: the view follows a real crouch
+// down (peeking under cover) and stays at the soldier's eyes when standing.
+// Prone soldier: the view sits at his eyes; lying down for real is what put
+// him there (Man::VRWantedStanceAction).
+void UpdateHeadDrop(const Vector3& headPos)
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    static int s_seenRecentre = -1;
+    if (!s_headDropValid || s_seenRecentre != s_recentreCount || headPos.Y() > s_standY)
+        s_standY = headPos.Y();
+    s_seenRecentre = s_recentreCount;
+    const float belowStand = headPos.Y() - s_standY; // <= 0
+    s_headDrop = -belowStand;
+    s_headDropValid = true;
+
+    // TrackedOffset's y is headPos - origin; shift it to the height wanted.
+    const float fromOrigin = headPos.Y() - s_headOrigin.Y();
+    float wanted = fromOrigin;
+    if (cfg.physicalStance >= 0.5f)
+        wanted = s_gameProne ? 0.0f : belowStand;
+    s_verticalShift = wanted - fromOrigin + cfg.eyeHeight;
+
+    // Sideways/forward: the soldier does not walk with the player's real
+    // steps, so keep only lean_free of it; the rest moves head and hands
+    // together back over the body.
+    const float dx = headPos.X() - s_headOrigin.X();
+    const float dz = headPos.Z() - s_headOrigin.Z();
+    const float dist = std::sqrt(dx * dx + dz * dz);
+    const float freeR = cfg.leanFree < 0.0f ? 0.0f : cfg.leanFree;
+    const float pull = dist > freeR ? (dist - freeR) / dist : 0.0f;
+    s_horizontalShift[0] = -dx * pull;
+    s_horizontalShift[1] = -dz * pull;
+}
+
+// OpenXR-space rotation of v by quaternion q (x, y, z, w).
+void RotateXr(const float q[4], const float v[3], float out[3])
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float cx = y * v[2] - z * v[1], cy = z * v[0] - x * v[2], cz = x * v[1] - y * v[0];
+    out[0] = v[0] + 2 * (w * cx + y * cz - z * cy);
+    out[1] = v[1] + 2 * (w * cy + z * cx - x * cz);
+    out[2] = v[2] + 2 * (w * cz + x * cy - y * cx);
+}
+
+float Dot3(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+// A rectangle in tracking space the controller can point at: the HUD quad
+// in a stereo frame, the flat virtual screen otherwise.
+struct PointerSurface
+{
+    float centre[3];
+    float right[3]; // unit axes; normal = right x up, facing the player
+    float up[3];
+    float normal[3];
+    float halfW;
+    float halfH;
+};
+
+// Ray from the right controller -> UI cursor (-1..+1, y down), or false
+// when it misses the surface.
+bool PointAt(const PoseidonVR::HandPose& aim, const PointerSurface& s, float& x, float& y)
+{
+    const float fwd[3] = {0, 0, -1};
+    float rayDir[3];
+    RotateXr(aim.orientation, fwd, rayDir);
+    const float denom = Dot3(rayDir, s.normal);
+    if (denom > -1e-4f)
+        return false; // pointing away
+    const float toCentre[3] = {s.centre[0] - aim.position[0], s.centre[1] - aim.position[1],
+                               s.centre[2] - aim.position[2]};
+    const float t = Dot3(toCentre, s.normal) / denom;
+    const float hit[3] = {aim.position[0] + rayDir[0] * t - s.centre[0], aim.position[1] + rayDir[1] * t - s.centre[1],
+                          aim.position[2] + rayDir[2] * t - s.centre[2]};
+    x = Dot3(hit, s.right) / s.halfW;
+    y = -Dot3(hit, s.up) / s.halfH;
+    if (x < -1.2f || x > 1.2f || y < -1.2f || y > 1.2f)
+        return false;
+    x = x < -1 ? -1 : x > 1 ? 1 : x;
+    y = y < -1 ? -1 : y > 1 ? 1 : y;
+    return true;
+}
+
+// HUD quad as submitted: head-locked, hudDistance ahead of the eyes.
+PointerSurface HudSurface()
+{
+    const auto& eyes = s_frame.eyes;
+    const float d = PoseidonVR::VRSession::Instance().Config().hudDistance;
+    const float ax[3] = {1, 0, 0}, ay[3] = {0, 1, 0}, az[3] = {0, 0, 1};
+    PointerSurface s;
+    RotateXr(eyes[0].orientation, ax, s.right);
+    RotateXr(eyes[0].orientation, ay, s.up);
+    RotateXr(eyes[0].orientation, az, s.normal);
+    for (int i = 0; i < 3; ++i)
+        s.centre[i] = (eyes[0].position[i] + eyes[1].position[i]) * 0.5f - s.normal[i] * d;
+    s.halfW = d * s_hudTanX;
+    s.halfH = d * s_hudTanY;
+    return s;
+}
+
+// Flat virtual screen as submitted: fixed in tracking space, 16:9.
+PointerSurface ScreenSurface()
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    PointerSurface s = {{0, 0, -cfg.screenDistance}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, cfg.screenWidth * 0.5f,
+                        cfg.screenWidth * 0.5f * 9.0f / 16.0f};
+    return s;
+}
+
+// The right controller works as a mouse: its ray places the UI cursor and
+// the right trigger clicks.  Active wherever there is UI to click and no
+// gun to fire: menus, map, the death/mission-end screens (spectator), the
+// dev panel, and every flat frame (menus without a 3D scene, loading).
+void UpdatePointer(const PoseidonVR::HandPose& aim, const PointerSurface& surface, bool active, unsigned int windowId,
+                   int winW, int winH)
+{
+    float x = 0, y = 0;
+    if (!active || !aim.valid || !PointAt(aim, surface, x, y))
+    {
+        if (!active)
+            s_pointerDown = false;
+        return;
+    }
+    Poseidon::InputSubsystem::Instance().SetPointerCursor(x, y);
+
+    // The dev panel (ImGui) tracks the OS mouse position from motion events;
+    // no relative motion, so nothing turns or aims.
+    SDL_Event motion = {};
+    motion.type = SDL_EVENT_MOUSE_MOTION;
+    motion.motion.windowID = windowId;
+    motion.motion.x = (x + 1) * 0.5f * winW;
+    motion.motion.y = (y + 1) * 0.5f * winH;
+    SDL_PushEvent(&motion);
+
+    const float trigger = PoseidonVR::VRSession::Instance().Controllers().trigger[1];
+    const bool down = s_pointerDown ? trigger > 0.4f : trigger > 0.6f;
+    if (down != s_pointerDown)
+    {
+        s_pointerDown = down;
+        SDL_Event ev = {};
+        ev.type = down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP;
+        ev.button.windowID = windowId;
+        ev.button.button = SDL_BUTTON_LEFT;
+        ev.button.down = down;
+        ev.button.clicks = 1;
+        ev.button.x = (x + 1) * 0.5f * winW;
+        ev.button.y = (y + 1) * 0.5f * winH;
+        SDL_PushEvent(&ev);
+    }
 }
 
 // The weapon points along the right controller's aim ray, its grip in the
@@ -285,6 +474,7 @@ Vector3 TrackedToWorld(const float p[3])
 void UpdateWeaponPose()
 {
     s_weaponValid = false;
+    s_twoHanded = false;
     const PoseidonVR::HandPose& aim = s_frame.aim[1];
     const PoseidonVR::HandPose& grip = s_frame.grip[1];
     if (!aim.valid || !grip.valid)
@@ -301,7 +491,10 @@ void UpdateWeaponPose()
         Vector3 dir = TrackedToWorld(support.position) - hand;
         const float len = dir.Size();
         if (len > 0.12f && len < 0.9f)
+        {
             orient.SetDirectionAndUp(dir * (1.0f / len), orient.DirectionUp());
+            s_twoHanded = true;
+        }
     }
 
     s_weaponWorld.SetOrientation(orient);
@@ -386,7 +579,29 @@ void DrawVRTab()
     ImGui::TextDisabled("Sticks L %.2f %.2f  R %.2f %.2f  Triggers %.2f %.2f  Grips %.2f %.2f%s", pad.moveX,
                         pad.moveY, pad.turnX, pad.turnY, pad.trigger[0], pad.trigger[1], pad.grip[0], pad.grip[1],
                         pad.active ? "" : "  (no input focus)");
-    ImGui::TextDisabled("Right stick click: recentre");
+    ImGui::TextDisabled("Right stick click: recentre (stand up straight for it)");
+
+    ImGui::SeparatorText("Weapon zeroing");
+    ImGui::SliderFloat("Zero yaw (deg, + right)", &c.zeroYaw, -3.0f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Zero pitch (deg, + up)", &c.zeroPitch, -3.0f, 3.0f, "%.2f");
+    ImGui::SliderFloat("Muzzle shift right (cm)", &c.muzzleRight, -10.0f, 10.0f, "%.1f");
+    ImGui::SliderFloat("Muzzle shift up (cm)", &c.muzzleUp, -10.0f, 10.0f, "%.1f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Angles: hits move more the farther the target. Shift: same offset at every distance.");
+
+    ImGui::SeparatorText("Physical stance");
+    bool physical = c.physicalStance >= 0.5f;
+    if (ImGui::Checkbox("Crouch / lie down for real", &physical))
+        c.physicalStance = physical ? 1.0f : 0.0f;
+    ImGui::SliderFloat("Prone at drop (m)", &c.proneDrop, 0.4f, 1.2f, "%.2f");
+    ImGui::SliderFloat("Eye height (m)", &c.eyeHeight, -0.3f, 0.3f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Raise if standing upright still feels crouched (the soldier is shorter than you).");
+    ImGui::SliderFloat("Free lean (m)", &c.leanFree, 0.0f, 0.3f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("How far the head may move sideways/forward before the body stays under it.");
+    if (s_headDropValid)
+        ImGui::TextDisabled("Head drop now: %.2f m", s_headDrop);
 
     ImGui::SeparatorText("Render");
     ImGui::SliderFloat("Eye scale", &c.eyeScale, 0.3f, 1.5f, "%.2f");
@@ -436,6 +651,7 @@ void EngineGL33::ShutdownVR()
     s_gamepad.Destroy();
     s_aimValid = false;
     s_weaponValid = false;
+    s_headDropValid = false;
     for (EyeTarget& t : s_eyes)
         DestroyEyeTarget(t);
     if (_vrBlitFbo)
@@ -462,6 +678,7 @@ int EngineGL33::VRScenePassCount()
         // No head pose this frame: leave aiming and the weapon to the game.
         s_aimValid = false;
         s_weaponValid = false;
+        s_headDropValid = false;
         return 1;
     }
     // The XR frame is begun: from here it is submitted in SubmitVRFrame even
@@ -487,9 +704,15 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         // never tilts the world.
         const auto& eyes = s_frame.eyes;
         const Vector3 headPos = (ToEnginePosition(eyes[0].position) + ToEnginePosition(eyes[1].position)) * 0.5f;
-        UpdateHeading(HeadingOf(ToEngineOrientation(eyes[0].orientation)), headPos, HeadingOf(s_gameCamera.Orientation()));
+        UpdateHeading(HeadingOf(ToEngineOrientation(eyes[0].orientation)), headPos, HeadingOf(s_gameCamera.Orientation()),
+                      s_gameCamera.Position());
+        UpdateHeadDrop(headPos);
         s_bodyYaw = YawMatrix(s_playerYaw);
         UpdateWeaponPose();
+        const auto ctx = Poseidon::InputSubsystem::Instance().GetContext();
+        const bool uiInput = ctx == Poseidon::InputContext::Menu || ctx == Poseidon::InputContext::Map ||
+                             ctx == Poseidon::InputContext::Spectator || Poseidon::Dev::DebugOverlay::IsVisible();
+        UpdatePointer(s_frame.aim[1], HudSurface(), uiInput, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
     }
 
     // Whatever is still queued belongs to the previous target.
@@ -497,7 +720,7 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
     FlushAndFreeAllQueues(_queueNo);
 
     const PoseidonVR::EyeView& eye = s_frame.eyes[pass];
-    PlaceCamera(camera, ToEngineOrientation(eye.orientation), ToEnginePosition(eye.position) - s_headOrigin);
+    PlaceCamera(camera, ToEngineOrientation(eye.orientation), TrackedOffset(eye.position));
     camera.SetPerspective(s_near, s_far, 1.0f, 1.0f);
     camera.SetAsymmetricFrustum(eye.tanLeft, eye.tanRight, eye.tanDown, eye.tanUp);
     camera.Adjust(this);
@@ -531,7 +754,7 @@ void EngineGL33::VRBeginHUDPass(Camera& camera)
     s_hudTanX = PoseidonVR::VRSession::Instance().Config().hudHalfWidthTan;
     s_hudTanY = _w > 0 ? s_hudTanX * _h / _w : s_hudTanX;
     const Matrix3 head = ToEngineOrientation(eyes[0].orientation);
-    PlaceCamera(camera, head, ToEnginePosition(centre) - s_headOrigin);
+    PlaceCamera(camera, head, TrackedOffset(centre));
     camera.SetPerspective(s_near, s_far, s_hudTanX, s_hudTanY);
     camera.Adjust(this);
 
@@ -549,12 +772,55 @@ bool EngineGL33::VRAimDirection(Vector3& dir) const
     return true;
 }
 
-bool EngineGL33::VRWeaponPose(Matrix4& world) const
+bool EngineGL33::VRWeaponTwoHanded() const
+{
+    return _vrActive && s_weaponValid && s_twoHanded;
+}
+
+bool EngineGL33::VRWeaponPose(Matrix4& world, bool firing) const
 {
     if (!_vrActive || !s_weaponValid)
         return false;
     world = s_weaponWorld;
+    if (firing)
+    {
+        // Zeroing turns and shifts the barrel line only (the drawn weapon
+        // stays as held): angles move hits more with distance, the origin
+        // shift moves them by the same amount everywhere.
+        const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+        world.SetPosition(world.Position() + world.DirectionAside() * (cfg.muzzleRight * 0.01f) +
+                          world.DirectionUp() * (cfg.muzzleUp * 0.01f));
+        Vector3 dir = world.Direction() + world.DirectionAside() * std::tan(cfg.zeroYaw * kDegToRad) +
+                      world.DirectionUp() * std::tan(cfg.zeroPitch * kDegToRad);
+        Matrix3 orient;
+        orient.SetDirectionAndUp(dir, world.DirectionUp());
+        world.SetOrientation(orient);
+    }
     return true;
+}
+
+bool EngineGL33::VRHeadDrop(float& metres) const
+{
+    if (!_vrActive || !s_headDropValid || PoseidonVR::VRSession::Instance().Config().physicalStance < 0.5f)
+        return false;
+    metres = s_headDrop;
+    return true;
+}
+
+void EngineGL33::VRSetPlayerBody(const void* id, const Matrix3& orientation)
+{
+    s_bodyId = id;
+    s_bodyHeading = HeadingOf(orientation);
+}
+
+float EngineGL33::VRProneDrop() const
+{
+    return PoseidonVR::VRSession::Instance().Config().proneDrop;
+}
+
+void EngineGL33::VRSetProne(bool prone)
+{
+    s_gameProne = prone;
 }
 
 void EngineGL33::BindVREyeTarget()
@@ -586,6 +852,8 @@ void EngineGL33::SubmitVRFrame()
     _vrStereoFrame = false;
     _vrFrameAttempted = false;
     _vrEyeTarget = -1;
+    // World reports the body again next frame if the camera is still on it.
+    s_bodyId = nullptr;
 }
 
 void EngineGL33::SubmitVRStereoFrame()
@@ -664,6 +932,11 @@ void EngineGL33::SubmitVRFlatFrame()
     int winW = _w, winH = _h;
     if (_sdlWindow)
         SDL_GetWindowSizeInPixels(_sdlWindow, &winW, &winH);
+
+    // Flat frames are all UI (menus without a 3D scene, loading): point and
+    // click on the virtual screen.  The window is 16:9 under VR, so it fills
+    // the screen and screen coordinates are window coordinates.
+    UpdatePointer(vr.Aim(1), ScreenSurface(), true, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
 
     RawBlitScope raw;
     if (!_vrBlitFbo)

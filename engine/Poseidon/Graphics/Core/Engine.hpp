@@ -391,8 +391,21 @@ class Engine : public IGraphicsEngine
     virtual bool VRAimDirection(Vector3& /*dir*/) const { return false; }
     // VR: world transform of the weapon held in the right controller
     // (+Z = barrel), placed at the weapon model's centre; false when there
-    // is no tracked hand.
-    virtual bool VRWeaponPose(Matrix4& /*world*/) const { return false; }
+    // is no tracked hand.  `firing` adds the player's zeroing to the barrel.
+    virtual bool VRWeaponPose(Matrix4& /*world*/, bool /*firing*/ = false) const { return false; }
+    // VR: how far the player's real head is below their standing height
+    // (metres); false when physical stance is off or nothing is tracked.
+    virtual bool VRHeadDrop(float& /*metres*/) const { return false; }
+    // VR: head drop that makes the soldier lie down, and whether he is
+    // prone now (the view height depends on it).
+    virtual float VRProneDrop() const { return 0.65f; }
+    virtual void VRSetProne(bool /*prone*/) {}
+    // VR: the object the player sees through this frame (soldier or vehicle)
+    // and its body orientation; called by World before drawing, not called
+    // when the camera is elsewhere (cutscene, free camera).
+    virtual void VRSetPlayerBody(const void* /*id*/, const Matrix3& /*orientation*/) {}
+    // VR: the left hand is on the weapon (two-handed hold) this frame.
+    virtual bool VRWeaponTwoHanded() const { return false; }
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

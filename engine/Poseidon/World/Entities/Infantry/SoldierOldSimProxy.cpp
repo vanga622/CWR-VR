@@ -963,6 +963,16 @@ void Man::Animate(int level)
                                           aimingRes.Size());
         }
 
+        // VR: arms follow the weapon in the controller (see VRArmsTransform).
+        Matrix4 vrArms;
+        bool vrTwoHanded = false;
+        if (VRArmsTransform(vrArms, vrTwoHanded))
+        {
+            BlendAnimInfo arms[6];
+            const int n = VRArmBones(arms, vrTwoHanded);
+            AnimationRT::CombineTransform(type->GetWeights(), _shape, memory, matrix, vrArms, arms, n);
+        }
+
         // legs selection needs to be applied only to graphical lods
         if (_shape->Resolution(level) < 1000 || level == type->_insideView)
         {

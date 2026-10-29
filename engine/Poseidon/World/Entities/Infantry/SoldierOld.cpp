@@ -794,18 +794,112 @@ const AnimationRTWeight& Man::GetProxyWeights(int level, const ProxyObject& prox
 // controller's aim.  Proxy +Y is taken as the weapon's up.
 Matrix4 Man::AnimateProxyMatrix(int level, const ProxyObject& proxy) const
 {
+    // The memory level is where the muzzle point and fire direction are
+    // read, so it carries the zeroing; drawn levels show the weapon as held.
     Matrix4 vrWeapon;
-    if (IsVRHeldWeaponProxy(level, proxy) && GEngine->VRWeaponPose(vrWeapon))
-    {
-        Vector3 barrel = GetMagazineSlot(_currentWeapon)._muzzle->_muzzleDir;
-        if (barrel.SquareSize() < 1e-6f)
-            barrel = VForward;
-        Matrix3 proxyAxes;
-        proxyAxes.SetDirectionAndUp(barrel, VUp);
-        vrWeapon.SetOrientation(vrWeapon.Orientation() * proxyAxes.InverseRotation());
-        return GetInvTransform() * vrWeapon;
-    }
+    if (IsVRHeldWeaponProxy(level, proxy) && VRWeaponModelMatrix(vrWeapon, level == _shape->FindMemoryLevel()))
+        return vrWeapon;
     return base::AnimateProxyMatrix(level, proxy);
+}
+
+bool Man::VRWeaponModelMatrix(Matrix4& out, bool firing) const
+{
+    if (_currentWeapon < 0 || !GEngine->VRWeaponPose(out, firing))
+        return false;
+    Vector3 barrel = GetMagazineSlot(_currentWeapon)._muzzle->_muzzleDir;
+    if (barrel.SquareSize() < 1e-6f)
+        barrel = VForward;
+    Matrix3 proxyAxes;
+    proxyAxes.SetDirectionAndUp(barrel, VUp);
+    out.SetOrientation(out.Orientation() * proxyAxes.InverseRotation());
+    out = GetInvTransform() * out;
+    return true;
+}
+
+// VR (M5): rigid arm follow.  The animation already holds the weapon with
+// both hands; moving the arm bones by the same delta that moves the weapon
+// from its animated pose to the controller keeps the hands on it.  Hands and
+// forearms move fully, upper arms half way so the elbow bends instead of the
+// arm leaving the shoulder.  The left arm only follows in a two-handed hold.
+bool Man::VRArmsTransform(Matrix4& delta, bool& twoHanded) const
+{
+    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0)
+        return false;
+    const WeaponType* weapon = GetMagazineSlot(_currentWeapon)._weapon;
+    if (!weapon)
+        return false;
+    const ManType* type = Type();
+    int weaponIndex = -1;
+    if (weapon->_weaponType & MaskSlotPrimary)
+        weaponIndex = type->_priWeaponIndex;
+    else if (weapon->_weaponType & MaskSlotSecondary)
+        weaponIndex = type->_secWeaponIndex;
+    else if (weapon->_weaponType & MaskSlotHandGun)
+        weaponIndex = type->_handGunIndex;
+    Matrix4 vrWeapon;
+    if (weaponIndex < 0 || !VRWeaponModelMatrix(vrWeapon))
+        return false;
+
+    const int memory = _shape->FindMemoryLevel();
+    const Matrix4 animated = base::AnimateProxyMatrix(memory, _shape->MemoryLevel()->Proxy(weaponIndex));
+    delta = vrWeapon * Matrix4(MInverseGeneral, animated);
+    twoHanded = GEngine->VRWeaponTwoHanded();
+    return true;
+}
+
+// VR (M5): lying down for real makes the soldier go prone, getting up makes
+// him stand.  With a rifle the game has only these two stances
+// (ManActDown from standing goes straight to prone, ManActCrouch does
+// nothing), so a real crouch only lowers the view (EngineGL33_VR) while the
+// soldier keeps standing.  The head drop is measured from the highest head
+// position since recentre, i.e. the player's own standing height; 10 cm of
+// hysteresis keeps it from flickering.  Rifle only (handgun and launcher
+// keep their own transitions).
+int Man::VRWantedStanceAction(int actPos) const
+{
+    float drop = 0.0f;
+    if (!GEngine->VRHeadDrop(drop) || IsHandGunSelected() || LauncherSelected() || FindWeaponType(MaskSlotPrimary) < 0)
+        return -1;
+    const bool prone = IsDown();
+    GEngine->VRSetProne(prone);
+    const float proneAt = GEngine->VRProneDrop();
+    const float hysteresis = 0.10f;
+    if (!prone && drop > proneAt)
+        return ManActDown;
+    if (prone && drop < proneAt - hysteresis)
+        return ManActUp;
+    return -1;
+}
+
+int Man::VRArmBones(BlendAnimInfo* out, bool twoHanded) const
+{
+    static const struct
+    {
+        const char* name;
+        float factor;
+        bool left;
+    } kBones[] = {
+        {"pruka", 1.0f, false}, {"ploket", 1.0f, false}, {"pbiceps", 0.5f, false},
+        {"lruka", 1.0f, true},  {"lloket", 1.0f, true},  {"lbiceps", 0.5f, true},
+    };
+    const Skeleton* skeleton = Type()->GetSkeleton();
+    int n = 0;
+    for (const auto& b : kBones)
+    {
+        if (b.left && !twoHanded)
+            continue;
+        for (int i = 0; skeleton && i < skeleton->NBones(); i++)
+        {
+            if (strcmpi(skeleton->GetBone(i), b.name) == 0)
+            {
+                out[n].matrixIndex = i;
+                out[n].factor = b.factor;
+                ++n;
+                break;
+            }
+        }
+    }
+    return n;
 }
 
 // VR: only the proxy of the weapon in hand (a launcher on the back or a

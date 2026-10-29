@@ -59,7 +59,11 @@ CursorMode Man::GetCursorRelMode(CameraType camType) const
     if (camType == CamInternal || camType == CamExternal)
     {
         auto& input = InputSubsystem::Instance();
-        if (IsVirtual(camType) && !input.IsLookAroundEnabled() && !input.IsMouseTurnActive())
+        // VR: the controller aim is a world direction like the mouse's; a
+        // body-relative cursor would turn with the body and spin it forever.
+        Vector3 vrAim;
+        if (IsVirtual(camType) && !input.IsLookAroundEnabled() && !input.IsMouseTurnActive() &&
+            !GEngine->VRAimDirection(vrAim))
         {
             return CKeyboard;
         }
@@ -112,7 +116,10 @@ void Soldier::KeyboardPilot(float deltaT, SimulationImportance prec)
     if (!_isDead)
     {
         bool internalCamera = IsGunner(GWorld->GetCameraType()) && GWorld->CameraOn() == this;
-        if (internalCamera && input.IsMouseTurnActive() && !input.IsLookAroundEnabled())
+        // VR: aiming with the controller turns the body like the mouse does.
+        Vector3 vrAim;
+        const bool vrAiming = GEngine->VRAimDirection(vrAim);
+        if (internalCamera && (input.IsMouseTurnActive() || vrAiming) && !input.IsLookAroundEnabled())
         {
             _turnWanted = 0;
             if (_gunYRotWanted < Type()->_minGunTurn)
@@ -323,7 +330,14 @@ void Soldier::KeyboardPilot(float deltaT, SimulationImportance prec)
         wantSlow = _walkToggle || GWorld->GetCameraTypeWanted() == CamGunner;
     }
 
-    if (input.GetMoveUp() > 0.1f)
+    // VR: crouching or lying down for real picks the stance.
+    const int vrStance = GWorld->FocusOn() == unit ? VRWantedStanceAction(actPos) : -1;
+    if (vrStance >= 0)
+    {
+        selAction = static_cast<ManAction>(vrStance);
+        forceAction = true;
+    }
+    else if (input.GetMoveUp() > 0.1f)
     {
         selAction = ManActUp;
         forceAction = true;

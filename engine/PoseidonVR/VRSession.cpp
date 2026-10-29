@@ -123,6 +123,16 @@ const ConfigKey kConfigKeys[] = {
     {"weapon", "offset_up", &VRConfig::weaponUp, "weapon centre above the right hand, metres"},
     {"weapon", "offset_right", &VRConfig::weaponRight, "weapon centre right of the right hand, metres"},
     {"weapon", "two_handed", &VRConfig::twoHanded, "1 = left grip near the weapon aims it with both hands"},
+    {"weapon", "zero_yaw", &VRConfig::zeroYaw, "zeroing, degrees: + moves hits right"},
+    {"weapon", "zero_pitch", &VRConfig::zeroPitch, "zeroing, degrees: + moves hits up"},
+    {"weapon", "muzzle_right", &VRConfig::muzzleRight, "shot origin shift, cm: + moves hits right at every distance"},
+    {"weapon", "muzzle_up", &VRConfig::muzzleUp, "shot origin shift, cm: + moves hits up at every distance"},
+    {"stance", "physical", &VRConfig::physicalStance,
+     "1 = crouching lowers the view, lying down makes the soldier go prone"},
+    {"stance", "prone_drop", &VRConfig::proneDrop, "head this far below standing height goes prone, metres"},
+    {"stance", "eye_height", &VRConfig::eyeHeight, "metres added to the soldier's eye height (+ if you feel too short)"},
+    {"stance", "lean_free", &VRConfig::leanFree,
+     "sideways/forward head move kept, metres; beyond it the body stays under the head"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -216,10 +226,27 @@ void LoadConfig()
 
 bool s_fake = false;
 ControllerState s_controllers;
+HandPose s_aim[2], s_grip[2]; // latest, for flat frames as well as stereo
 constexpr int kFakeEyeSize = 1440;
+std::chrono::steady_clock::time_point s_fakeStart;
+
+// Scripted head height for --vr-fake (env CWR_VR_FAKE_SCRIPT=stance): stand,
+// crouch, stand, lie down, half up, stand, 4 s each, to check the physical
+// stance without a headset.  0 otherwise.
+float FakeHeadHeight()
+{
+    static const char* script = std::getenv("CWR_VR_FAKE_SCRIPT");
+    if (!script || std::strcmp(script, "stance") != 0)
+        return 0.0f;
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count();
+    static const float kHeights[] = {0.0f, -0.45f, 0.0f, -0.90f, -0.30f, 0.0f};
+    const int phase = static_cast<int>(t / 4.0f);
+    return kHeights[phase < 6 ? phase : 5];
+}
 
 void FillFakeFrame(StereoFrame& out)
 {
+    const float headY = FakeHeadHeight();
     // Quest-2-like eyes: 64 mm IPD, slightly wider outward than inward.
     for (int i = 0; i < 2; ++i)
     {
@@ -227,6 +254,7 @@ void FillFakeFrame(StereoFrame& out)
         const float side = i == 0 ? -1.0f : 1.0f;
         e = EyeView{};
         e.position[0] = side * 0.032f;
+        e.position[1] = headY;
         e.tanLeft = i == 0 ? -1.0f : -0.84f;
         e.tanRight = i == 0 ? 0.84f : 1.0f;
         e.tanUp = 0.96f;
@@ -242,13 +270,18 @@ void FillFakeFrame(StereoFrame& out)
             *p = HandPose{};
             p->valid = true;
             p->position[0] = handPos[i][0];
-            p->position[1] = handPos[i][1];
+            p->position[1] = handPos[i][1] + headY;
             p->position[2] = handPos[i][2];
         }
     }
     // Left grip held, so the two-handed path is what the screenshots show.
     s_controllers = ControllerState{};
     s_controllers.grip[0] = 1.0f;
+    for (int i = 0; i < 2; ++i)
+    {
+        s_aim[i] = out.aim[i];
+        s_grip[i] = out.grip[i];
+    }
     out.eyeWidth = out.eyeHeight = static_cast<int>(kFakeEyeSize * s_config.eyeScale);
     out.eyeTexture[0] = out.eyeTexture[1] = 0;
     out.hudTexture = 0;
@@ -971,6 +1004,7 @@ bool VRSession::InitFake()
     Log("CWR-VR: fake headset (--vr-fake), no OpenXR runtime used");
     LoadConfig();
     s_fake = true;
+    s_fakeStart = std::chrono::steady_clock::now();
     Log("Fake eyes: %dx%d, IPD 64 mm, fixed pose", static_cast<int>(kFakeEyeSize * s_config.eyeScale),
         static_cast<int>(kFakeEyeSize * s_config.eyeScale));
     return true;
@@ -994,6 +1028,16 @@ VRConfig& VRSession::MutableConfig()
 const ControllerState& VRSession::Controllers() const
 {
     return s_controllers;
+}
+
+const HandPose& VRSession::Aim(int hand) const
+{
+    return s_aim[hand];
+}
+
+const HandPose& VRSession::Grip(int hand) const
+{
+    return s_grip[hand];
 }
 
 void VRSession::LogLine(const char* text)
@@ -1142,6 +1186,13 @@ bool VRSession::BeginFlatFrame(FlatFrameTarget& out)
         AbortFrame();
         return false;
     }
+    // Hands too, so the controller can point at the flat screen (menus
+    // shown without a 3D scene).
+    for (int i = 0; i < 2; ++i)
+    {
+        LocateHand(s.gripSpace[i], s_grip[i]);
+        LocateHand(s.aimSpace[i], s_aim[i]);
+    }
     out.width = s.screen.width;
     out.height = s.screen.height;
     return true;
@@ -1216,6 +1267,8 @@ bool VRSession::BeginStereoFrame(StereoFrame& out)
         out.eyeTexture[i] = AcquireImage(s.eyes[i]);
         LocateHand(s.gripSpace[i], out.grip[i]);
         LocateHand(s.aimSpace[i], out.aim[i]);
+        s_grip[i] = out.grip[i];
+        s_aim[i] = out.aim[i];
     }
     out.eyeWidth = s.eyes[0].width;
     out.eyeHeight = s.eyes[0].height;

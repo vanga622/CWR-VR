@@ -49,6 +49,9 @@ namespace DebugOverlay
     // VR: one extra tab drawn by a backend library (the CWR-VR "VR" tab), so
     // the core panel needs no dependency on it.  nullptr removes it.
     void SetExtraTab(const char* name, void (*draw)());
+    // VR: GL framebuffer Render() draws into (0 = the window, the default);
+    // the VR backend points it at the HUD layer's target in stereo frames.
+    void SetRenderTarget(unsigned int framebuffer);
 
     // Returns true if the focused ImGui widget wants to swallow keyboard /
     // mouse events.  Callers should drop the SDL event before passing it to

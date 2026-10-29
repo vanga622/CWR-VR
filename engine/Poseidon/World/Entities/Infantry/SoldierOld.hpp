@@ -956,6 +956,12 @@ class Man: public Person
 	// person; drawing, muzzle point and fire direction all go through here.
 	Matrix4 AnimateProxyMatrix( int level, const ProxyObject &proxy ) const override;
 	bool IsVRHeldWeaponProxy( int level, const ProxyObject &proxy ) const;
+	bool VRWeaponModelMatrix( Matrix4 &out, bool firing = false ) const;
+	// VR (M5): stance from the player's real head height; -1 = keep.
+	int VRWantedStanceAction( int actPos ) const;
+	// VR (M5): arm bones follow the weapon in the controller.
+	bool VRArmsTransform( Matrix4 &delta, bool &twoHanded ) const;
+	int VRArmBones( BlendAnimInfo *out, bool twoHanded ) const;
 	void AnimateMatrix( Matrix4 &mat, int level, int selection ) const override;
 
 	void AnimateMatrix( Matrix4 &mat, const AnimationRTWeight &wgt ) const;

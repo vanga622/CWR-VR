@@ -601,12 +601,14 @@ void EngineGL33::BackToFront()
     // VR: in a stereo frame the window shows the eyes; draw ImGui onto the
     // resolved HUD target instead, so the dev panel shows in the headset.
     const bool overlayOnHud = _vrStereoFrame && SSAAActive();
-    if (overlayOnHud)
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, _ssaaResolveFbo);
+    DebugOverlay::SetRenderTarget(overlayOnHud ? _ssaaResolveFbo : 0);
     DebugOverlay::NewFrame();
     DebugOverlay::Render();
     if (overlayOnHud)
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    {
+        DebugOverlay::SetRenderTarget(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     // ImGui's GL backend binds its own VAO/textures — drop the bind cache
     // so the next cached bind re-applies real state (B-007).
     GL33Bind::Invalidate();

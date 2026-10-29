@@ -990,6 +990,15 @@ void InputSubsystem::ResetCursorPosition()
     GInput.cursor.cursorY = 0;
 }
 
+// VR: also marks the mouse as the active cursor device, so menus show and
+// hit-test the pointer instead of keyboard/gamepad focus.
+void InputSubsystem::SetPointerCursor(float x, float y)
+{
+    GInput.cursor.cursorX = x;
+    GInput.cursor.cursorY = y;
+    GInput.mouse.cursorLastActive = Glob.uiTime;
+}
+
 void InputSubsystem::FlushAndResetMouse()
 {
     GInput.mouse.FlushAndReset();

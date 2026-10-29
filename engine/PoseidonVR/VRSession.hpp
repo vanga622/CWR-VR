@@ -37,6 +37,22 @@ struct VRConfig
     float weaponUp = 0.06f;
     float weaponRight = 0.0f;
     float twoHanded = 1.0f;      // 1 = left grip near the weapon steadies it with both hands
+    // Zeroing: turns the shot (not the model) so hits land on the sights.
+    float zeroYaw = 0.0f;        // degrees, + = hits move right
+    float zeroPitch = 0.0f;      // degrees, + = hits move up
+    // Shot origin shift (a constant offset at every distance), centimetres.
+    float muzzleRight = 0.0f;    // + = hits move right
+    float muzzleUp = 0.0f;       // + = hits move up
+    // Physical stance: a real crouch lowers the view (the soldier keeps
+    // standing; the game has no rifle crouch), lying down past proneDrop
+    // below standing height makes him go prone.
+    float physicalStance = 1.0f; // 1 = on
+    float proneDrop = 0.65f;     // metres below standing height
+    float eyeHeight = 0.0f;      // metres added to the soldier's eye height (taller/shorter player)
+    // Sideways/forward head moves kept before the soldier's body "follows"
+    // (beyond it, head and hands are pulled back over the body so the arms
+    // never stretch and the view never enters the shoulders), metres.
+    float leanFree = 0.05f;
 };
 
 // Controller state from the OpenXR actions (Touch layout), refreshed every
@@ -117,6 +133,9 @@ public:
 
     // Latest controller state (synced with each Begin*Frame).
     const ControllerState& Controllers() const;
+    // Latest hand poses, located with each Begin*Frame (flat frames too).
+    const HandPose& Aim(int hand) const;
+    const HandPose& Grip(int hand) const;
 
     // One line in vr.log, for VR events decided outside this library
     // (recentre, heading re-sync).
