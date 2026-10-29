@@ -400,6 +400,12 @@ void EngineGL33::SetMsaaSamples(int samples)
 
 void EngineGL33::RenderTargetSize(int& w, int& h) const
 {
+    // VR: an eye pass renders into that eye's target.
+    if (_vrEyeTarget >= 0)
+    {
+        VREyeTargetSize(w, h);
+        return;
+    }
     if (SSAAActive())
     {
         w = _ssaaW;
@@ -515,6 +521,12 @@ void EngineGL33::ResolveSSAAToDefault()
 
 void EngineGL33::BindFrameRenderTarget()
 {
+    // VR: an eye pass renders into that eye's target.
+    if (_vrEyeTarget >= 0)
+    {
+        BindVREyeTarget();
+        return;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, SSAAActive() ? _ssaaFbo : 0);
     int w, h;
     RenderTargetSize(w, h);
@@ -597,10 +609,11 @@ void EngineGL33::BackToFront()
     // readback samples the same back buffer that's about to swap.
     // Readback after SwapWindow on a double-buffered context is
     // undefined, so the capture has to happen pre-swap.
-    CaptureScreenshotIfPending();
+    // VR: hand the frame to the headset (and, with --vr-mirror, put the eyes
+    // in the window) before the capture, so screenshots show what was sent.
+    SubmitVRFrame();
 
-    // VR: same final pixels onto the headset's virtual screen, pre-swap.
-    SubmitVRFlatFrame();
+    CaptureScreenshotIfPending();
 
     if (_glContext && _sdlWindow)
         SDL_GL_SwapWindow(_sdlWindow);

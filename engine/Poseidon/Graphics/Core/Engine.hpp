@@ -29,6 +29,8 @@
 namespace Poseidon
 {
 
+class Camera; // VR: stereo pass hooks below
+
 // Per-frame draw-call counter — incremented at the GL emission seams,
 // consumed + reset by World::Simulate's FrameProfiler EndFrame.
 extern int gPerfDrawCalls;
@@ -375,6 +377,15 @@ class Engine : public IGraphicsEngine
     virtual void DrawTestPattern(const char* /*name*/) {} // Harness-only: draw named test pattern
     virtual void NextFrame();                             // swap frames - get ready for next frame
     virtual bool InitDrawDone() { return true; }
+
+    // VR: stereo frame hooks (CWR-VR), called by World between InitDraw and
+    // FinishDraw.  VRScenePassCount starts the frame and says how often the
+    // 3D scene is drawn (2 = one pass per eye); VRBeginScenePass points the
+    // camera and render target at that pass; VRBeginHUDPass prepares the
+    // target and camera for HUD/UI.  Flat engines keep these defaults.
+    virtual int VRScenePassCount() { return 1; }
+    virtual void VRBeginScenePass(int /*pass*/, Camera& /*camera*/) {}
+    virtual void VRBeginHUDPass(Camera& /*camera*/) {}
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

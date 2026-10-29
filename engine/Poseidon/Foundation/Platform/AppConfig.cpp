@@ -359,6 +359,8 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
         displayGroup->add_flag("--menu-scene,!--no-menu-scene", showMenuScene, "Show 3D background scene in menu");
         // VR: OpenXR session, log written to vr.log next to the executable
         displayGroup->add_flag("--vr", _vrEnabled, "Show the game in a VR headset through OpenXR");
+        displayGroup->add_flag("--vr-fake", _vrFake, "VR without a headset: fixed eye poses (implies --vr)");
+        displayGroup->add_flag("--vr-mirror", _vrMirror, "VR: show both eyes side by side in the window");
 
         showOption(
             displayGroup->add_option("--render", _renderBackend, "Graphics backend: dummy, gl33, auto (default: gl33)")
@@ -784,6 +786,16 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
             _widthExplicit = widthOpt->count() > 0;
             _heightExplicit = heightOpt->count() > 0;
             _displayModeExplicit = displayModeOpt->count() > 0;
+
+            // VR: the window frame becomes the headset HUD; the 800x600
+            // windowed default (or a saved small size) is unreadable spread
+            // over ~60 degrees.  Treat 1080p as if given on the command line.
+            if (IsVREnabled() && !_widthExplicit && !_heightExplicit)
+            {
+                _windowWidth = 1920;
+                _windowHeight = 1080;
+                _widthExplicit = _heightExplicit = true;
+            }
 
             // --window flag overrides display mode
             if (_windowMode && !_displayModeExplicit)

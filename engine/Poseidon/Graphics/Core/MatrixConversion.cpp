@@ -93,8 +93,9 @@ void ConvertProjectionMatrix(GfxMatrix& mat, Matrix4Val src, float zBias)
         }
     }
 
-    mat._31 = 0;
-    mat._32 = 0;
+    // VR: off-centre terms of an asymmetric eye frustum; 0 for flat cameras.
+    mat._31 = src(0, 2);
+    mat._32 = src(1, 2);
     mat._33 = c;
     mat._34 = 1;
 

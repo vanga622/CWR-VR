@@ -22,6 +22,16 @@ void Camera::SetPerspective(Coord cNear, Coord cFar, Coord cLeft, Coord cTop)
     _cNear = cNear, _cFar = cFar, _cLeft = cLeft, _cTop = cTop;
     _cAddNear = cNear;
     _cAddFar = cFar;
+    _asymmetric = false; // VR
+}
+
+// VR: see Camera.hpp.
+void Camera::SetAsymmetricFrustum(Coord tanLeft, Coord tanRight, Coord tanDown, Coord tanUp)
+{
+    _asymmetric = true;
+    _tanLeft = tanLeft, _tanRight = tanRight, _tanDown = tanDown, _tanUp = tanUp;
+    _cLeft = floatMax(-tanLeft, tanRight);
+    _cTop = floatMax(-tanDown, tanUp);
 }
 
 void Camera::SetPerspectiveForView(Engine* engine, Coord cNear, Coord cFar, Coord fov)
@@ -101,6 +111,23 @@ void Camera::Adjust(Engine* engine)
     _projection(0, 2) = x0 + w * 0.5f;
     _projection(1, 2) = y0 + h * 0.5f;
     _projection.SetPosition(Vector3(0, 0, -q * _cNear));
+
+    if (_asymmetric)
+    {
+        // VR: off-centre frustum.  _projectionNormal works on view space,
+        // _projection on the _scale'd space (x/cLeft, y/cTop).
+        const float rl = _tanRight - _tanLeft;
+        const float ud = _tanUp - _tanDown;
+        _projectionNormal(0, 0) = 2.0f / rl;
+        _projectionNormal(0, 2) = -(_tanRight + _tanLeft) / rl;
+        _projectionNormal(1, 1) = 2.0f / ud;
+        _projectionNormal(1, 2) = -(_tanUp + _tanDown) / ud;
+
+        _projection(0, 0) = w * _cLeft / rl;
+        _projection(0, 2) = x0 - w * _tanLeft / rl;
+        _projection(1, 1) = -h * _cTop / ud;
+        _projection(1, 2) = y0 + h * _tanUp / ud;
+    }
 
     _scale = Matrix4(MScale, _invCLeft, _invCTop, 1);
     // after easy clipping rescale viewing frustum to get correct screen coordinates

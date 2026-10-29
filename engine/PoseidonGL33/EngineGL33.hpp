@@ -580,13 +580,30 @@ class EngineGL33 : public Engine
     void BackToFront();
     void CaptureScreenshotIfPending();
 
-    // VR: OpenXR virtual screen (EngineGL33_VR.cpp).  Inactive unless --vr.
+    // VR: OpenXR stereo + virtual screen (EngineGL33_VR.cpp).  Inactive
+    // unless --vr / --vr-fake.
     void InitVR();
     void ShutdownVR();
-    // Copy the finished window frame into the headset's quad swapchain.
+    // Before swap: stereo frame -> eyes + HUD to the headset; otherwise the
+    // finished window frame onto the virtual screen.
+    void SubmitVRFrame();
+    void SubmitVRStereoFrame();
     void SubmitVRFlatFrame();
+    // Eye render target, bound by BindFrameRenderTarget during an eye pass.
+    void BindVREyeTarget();
+    void VREyeTargetSize(int& w, int& h) const;
     bool _vrActive = false;
+    bool _vrStereoFrame = false;    // this frame was drawn per eye
+    bool _vrFrameAttempted = false; // VRScenePassCount ran this frame
+    int _vrEyeTarget = -1;          // eye pass in progress, -1 = window target
     unsigned int _vrBlitFbo = 0;
+
+  public:
+    int VRScenePassCount() override;
+    void VRBeginScenePass(int pass, Camera& camera) override;
+    void VRBeginHUDPass(Camera& camera) override;
+
+  protected:
 
   public:
     EngineGL33(int width, int height, bool windowed, int bpp);

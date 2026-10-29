@@ -1,8 +1,12 @@
 #include <PoseidonVR/VRSession.hpp>
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
+#include <string>
 
 #if defined(_WIN32)
 
@@ -22,8 +26,6 @@
 #include <openxr/openxr_platform.h>
 
 #include <chrono>
-#include <cstring>
-#include <string>
 #include <vector>
 
 #endif
@@ -33,27 +35,31 @@ namespace PoseidonVR
 namespace
 {
 
-// --- vr.log ---------------------------------------------------------------
+// --- Files next to the executable -------------------------------------------
+
+std::string ExeDirFile(const char* name)
+{
+#if defined(_WIN32)
+    // Next to the executable, not in the working directory (that is the
+    // game data folder).
+    char path[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    while (len > 0 && path[len - 1] != '\\' && path[len - 1] != '/')
+        --len;
+    return std::string(path, len) + name;
+#else
+    return name;
+#endif
+}
+
+// --- vr.log -------------------------------------------------------------------
 
 FILE* s_log = nullptr;
 
 void OpenLog()
 {
-    if (s_log)
-        return;
-#if defined(_WIN32)
-    // Next to the executable, not in the working directory (that is the
-    // game data folder).
-    wchar_t path[MAX_PATH] = {};
-    DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    while (len > 0 && path[len - 1] != L'\\' && path[len - 1] != L'/')
-        --len;
-    path[len] = 0;
-    wcscat_s(path, L"vr.log");
-    s_log = _wfopen(path, L"w");
-#else
-    s_log = std::fopen("vr.log", "w");
-#endif
+    if (!s_log)
+        s_log = std::fopen(ExeDirFile("vr.log").c_str(), "w");
 }
 
 void CloseLog()
@@ -88,20 +94,134 @@ void Log(const char* fmt, ...)
     std::fflush(s_log);
 }
 
+// --- vr.ini -------------------------------------------------------------------
+
+VRConfig s_config;
+
+struct ConfigKey
+{
+    const char* section;
+    const char* key;
+    float VRConfig::*field;
+    const char* comment;
+};
+
+const ConfigKey kConfigKeys[] = {
+    {"render", "eye_scale", &VRConfig::eyeScale, "eye image size relative to the headset's recommendation"},
+    {"hud", "distance", &VRConfig::hudDistance, "metres in front of the eyes"},
+    {"hud", "half_width_tan", &VRConfig::hudHalfWidthTan, "horizontal half-size as tan(angle); 0.6 = 31 deg"},
+    {"screen", "distance", &VRConfig::screenDistance, "flat virtual screen (menus, loading), metres"},
+    {"screen", "width", &VRConfig::screenWidth, "flat virtual screen width, metres (16:9)"},
+};
+
+void WriteDefaultConfig(const std::string& path)
+{
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f)
+        return;
+    std::fprintf(f, "; CWR-VR tunables. Delete this file to get the defaults back.\n");
+    const VRConfig defaults;
+    const char* section = "";
+    for (const auto& k : kConfigKeys)
+    {
+        if (std::strcmp(section, k.section) != 0)
+        {
+            section = k.section;
+            std::fprintf(f, "\n[%s]\n", section);
+        }
+        std::fprintf(f, "; %s\n%s=%g\n", k.comment, k.key, defaults.*k.field);
+    }
+    std::fclose(f);
+}
+
+void LoadConfig()
+{
+    s_config = VRConfig{};
+    const std::string path = ExeDirFile("vr.ini");
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f)
+    {
+        WriteDefaultConfig(path);
+        Log("vr.ini: not found, wrote defaults to %s", path.c_str());
+        return;
+    }
+
+    std::string section;
+    char line[256];
+    while (std::fgets(line, sizeof(line), f))
+    {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+            s.pop_back();
+        if (s.empty() || s[0] == ';' || s[0] == '#')
+            continue;
+        if (s[0] == '[')
+        {
+            section = s.substr(1, s.find(']') - 1);
+            continue;
+        }
+        const size_t eq = s.find('=');
+        if (eq == std::string::npos)
+            continue;
+        const std::string key = s.substr(0, eq);
+        const float value = static_cast<float>(std::atof(s.c_str() + eq + 1));
+        for (const auto& k : kConfigKeys)
+            if (section == k.section && key == k.key)
+                s_config.*k.field = value;
+    }
+    std::fclose(f);
+
+    if (s_config.eyeScale < 0.2f || s_config.eyeScale > 2.0f)
+        s_config.eyeScale = VRConfig{}.eyeScale;
+    Log("vr.ini: eye_scale=%g hud distance=%g half_width_tan=%g screen distance=%g width=%g", s_config.eyeScale,
+        s_config.hudDistance, s_config.hudHalfWidthTan, s_config.screenDistance, s_config.screenWidth);
+}
+
+// --- Fake headset -------------------------------------------------------------
+
+bool s_fake = false;
+constexpr int kFakeEyeSize = 1440;
+
+void FillFakeFrame(StereoFrame& out)
+{
+    // Quest-2-like eyes: 64 mm IPD, slightly wider outward than inward.
+    for (int i = 0; i < 2; ++i)
+    {
+        EyeView& e = out.eyes[i];
+        const float side = i == 0 ? -1.0f : 1.0f;
+        e = EyeView{};
+        e.position[0] = side * 0.032f;
+        e.tanLeft = i == 0 ? -1.0f : -0.84f;
+        e.tanRight = i == 0 ? 0.84f : 1.0f;
+        e.tanUp = 0.96f;
+        e.tanDown = -1.1f;
+    }
+    out.eyeWidth = out.eyeHeight = static_cast<int>(kFakeEyeSize * s_config.eyeScale);
+    out.eyeTexture[0] = out.eyeTexture[1] = 0;
+    out.hudTexture = 0;
+    out.hudWidth = out.hudHeight = 0;
+}
+
 #if defined(_WIN32)
 
-// --- OpenXR state ---------------------------------------------------------
+// --- OpenXR state -------------------------------------------------------------
 
-// Virtual screen: 16:9, 3.2 m wide, 2.5 m in front of the initial head pose.
-// TODO(M2): move to vr.ini with the other tunables.
 constexpr int kScreenPixelsW = 1920;
 constexpr int kScreenPixelsH = 1080;
-constexpr float kScreenMetersW = 3.2f;
-constexpr float kScreenMetersH = 1.8f;
-constexpr float kScreenDistance = 2.5f;
+constexpr int kHudPixelsW = 1920;
+constexpr int kHudPixelsH = 1080;
 
 constexpr int64_t kGL_RGBA8 = 0x8058;
 constexpr int64_t kGL_SRGB8_ALPHA8 = 0x8C43;
+
+struct Swapchain
+{
+    XrSwapchain handle = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageOpenGLKHR> images;
+    int width = 0;
+    int height = 0;
+    bool acquired = false;
+};
 
 struct State
 {
@@ -109,20 +229,23 @@ struct State
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     XrSession session = XR_NULL_HANDLE;
     XrSpace localSpace = XR_NULL_HANDLE;
-    XrSwapchain swapchain = XR_NULL_HANDLE;
-    std::vector<XrSwapchainImageOpenGLKHR> images;
-    int swapW = 0;
-    int swapH = 0;
+    XrSpace viewSpace = XR_NULL_HANDLE;
+    int64_t format = 0;
+    Swapchain screen;  // flat virtual screen
+    Swapchain eyes[2]; // stereo
+    Swapchain hud;     // head-locked HUD
+    XrView views[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    XrViewConfigurationView viewConfig[2] = {{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
     XrEnvironmentBlendMode blendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     XrSessionState sessionState = XR_SESSION_STATE_UNKNOWN;
     bool running = false;
     bool frameBegun = false;
-    bool imageAcquired = false;
     XrTime predictedDisplayTime = 0;
 
     // Frame timing, summarised to vr.log every kStatsFrames frames.
     static constexpr int kStatsFrames = 600;
     int statsFrames = 0;
+    int statsStereo = 0;
     int statsSkipped = 0;
     double statsWaitMs = 0.0;
     double statsPeriodMs = 0.0;
@@ -203,30 +326,30 @@ bool LogExtensionsAndCheckGL()
     return hasGL;
 }
 
-void LogSystem()
+bool LogSystemAndViews()
 {
     XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
-    if (!Check(xrGetSystemProperties(s.instance, s.systemId, &props), "xrGetSystemProperties"))
-        return;
-    Log("System: \"%s\" vendor 0x%x, max swapchain %ux%u, max layers %u, tracking orientation=%d position=%d",
-        props.systemName, props.vendorId, props.graphicsProperties.maxSwapchainImageWidth,
-        props.graphicsProperties.maxSwapchainImageHeight, props.graphicsProperties.maxLayerCount,
-        props.trackingProperties.orientationTracking, props.trackingProperties.positionTracking);
+    if (Check(xrGetSystemProperties(s.instance, s.systemId, &props), "xrGetSystemProperties"))
+        Log("System: \"%s\" vendor 0x%x, max swapchain %ux%u, max layers %u, tracking orientation=%d position=%d",
+            props.systemName, props.vendorId, props.graphicsProperties.maxSwapchainImageWidth,
+            props.graphicsProperties.maxSwapchainImageHeight, props.graphicsProperties.maxLayerCount,
+            props.trackingProperties.orientationTracking, props.trackingProperties.positionTracking);
 
-    // Stereo view sizes, for M2.
     uint32_t viewCount = 0;
-    if (XR_SUCCEEDED(xrEnumerateViewConfigurationViews(s.instance, s.systemId,
-                                                       XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount,
-                                                       nullptr)))
+    if (!Check(xrEnumerateViewConfigurationViews(s.instance, s.systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+                                                 0, &viewCount, nullptr),
+               "xrEnumerateViewConfigurationViews") ||
+        viewCount != 2)
     {
-        std::vector<XrViewConfigurationView> views(viewCount, {XR_TYPE_VIEW_CONFIGURATION_VIEW});
-        xrEnumerateViewConfigurationViews(s.instance, s.systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                                          viewCount, &viewCount, views.data());
-        for (uint32_t i = 0; i < viewCount; ++i)
-            Log("  view %u: recommended %ux%u (max %ux%u), samples %u", i, views[i].recommendedImageRectWidth,
-                views[i].recommendedImageRectHeight, views[i].maxImageRectWidth, views[i].maxImageRectHeight,
-                views[i].recommendedSwapchainSampleCount);
+        Log("ERROR: expected 2 stereo views, got %u", viewCount);
+        return false;
     }
+    xrEnumerateViewConfigurationViews(s.instance, s.systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2,
+                                      &viewCount, s.viewConfig);
+    for (uint32_t i = 0; i < 2; ++i)
+        Log("  view %u: recommended %ux%u (max %ux%u), samples %u", i, s.viewConfig[i].recommendedImageRectWidth,
+            s.viewConfig[i].recommendedImageRectHeight, s.viewConfig[i].maxImageRectWidth,
+            s.viewConfig[i].maxImageRectHeight, s.viewConfig[i].recommendedSwapchainSampleCount);
 
     uint32_t blendCount = 0;
     if (XR_SUCCEEDED(xrEnumerateEnvironmentBlendModes(s.instance, s.systemId,
@@ -241,6 +364,7 @@ void LogSystem()
         for (auto m : modes)
             Log("  blend mode %d", static_cast<int>(m));
     }
+    return true;
 }
 
 bool CheckGLRequirements()
@@ -267,11 +391,11 @@ bool CheckGLRequirements()
     return true;
 }
 
-int64_t PickSwapchainFormat()
+bool PickSwapchainFormat()
 {
     uint32_t count = 0;
     if (!Check(xrEnumerateSwapchainFormats(s.session, 0, &count, nullptr), "xrEnumerateSwapchainFormats"))
-        return 0;
+        return false;
     std::vector<int64_t> formats(count);
     xrEnumerateSwapchainFormats(s.session, count, &count, formats.data());
 
@@ -284,47 +408,67 @@ int64_t PickSwapchainFormat()
     }
     Log("Swapchain formats (%u):%s", count, list.c_str());
 
-    // The flat frame is already gamma-encoded RGBA8.  An sRGB swapchain
-    // stores those bytes unchanged (raw blit) and the compositor decodes them
-    // correctly; a linear RGBA8 swapchain would show it too bright.
+    // The engine's frames are already gamma-encoded RGBA8.  An sRGB
+    // swapchain stores those bytes unchanged (raw blit) and the compositor
+    // decodes them correctly; a linear RGBA8 swapchain would show them too
+    // bright.
     for (int64_t want : {kGL_SRGB8_ALPHA8, kGL_RGBA8})
         for (auto f : formats)
             if (f == want)
-                return f;
-    return formats.empty() ? 0 : formats[0];
+            {
+                s.format = f;
+                return true;
+            }
+    s.format = formats.empty() ? 0 : formats[0];
+    return s.format != 0;
 }
 
-bool CreateQuadSwapchain()
+bool CreateSwapchain(Swapchain& sc, int width, int height, const char* what)
 {
-    const int64_t format = PickSwapchainFormat();
-    if (format == 0)
-        return false;
-
     XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
                       XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-    info.format = format;
+    info.format = s.format;
     info.sampleCount = 1;
-    info.width = kScreenPixelsW;
-    info.height = kScreenPixelsH;
+    info.width = width;
+    info.height = height;
     info.faceCount = 1;
     info.arraySize = 1;
     info.mipCount = 1;
-    if (!Check(xrCreateSwapchain(s.session, &info, &s.swapchain), "xrCreateSwapchain"))
+    if (!Check(xrCreateSwapchain(s.session, &info, &sc.handle), what))
         return false;
 
     uint32_t count = 0;
-    xrEnumerateSwapchainImages(s.swapchain, 0, &count, nullptr);
-    s.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR});
-    if (!Check(xrEnumerateSwapchainImages(s.swapchain, count, &count,
-                                          reinterpret_cast<XrSwapchainImageBaseHeader*>(s.images.data())),
+    xrEnumerateSwapchainImages(sc.handle, 0, &count, nullptr);
+    sc.images.assign(count, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR});
+    if (!Check(xrEnumerateSwapchainImages(sc.handle, count, &count,
+                                          reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data())),
                "xrEnumerateSwapchainImages"))
         return false;
+    sc.width = width;
+    sc.height = height;
+    Log("Swapchain %s: %dx%d format 0x%llx, %u images", what, width, height,
+        static_cast<unsigned long long>(s.format), count);
+    return true;
+}
 
-    s.swapW = kScreenPixelsW;
-    s.swapH = kScreenPixelsH;
-    Log("Quad swapchain: %dx%d format 0x%llx, %u images, %.1fx%.1f m at %.1f m", s.swapW, s.swapH,
-        static_cast<unsigned long long>(format), count, kScreenMetersW, kScreenMetersH, kScreenDistance);
+bool CreateSwapchains()
+{
+    if (!PickSwapchainFormat() || !CreateSwapchain(s.screen, kScreenPixelsW, kScreenPixelsH, "screen") ||
+        !CreateSwapchain(s.hud, kHudPixelsW, kHudPixelsH, "hud"))
+        return false;
+    for (int i = 0; i < 2; ++i)
+    {
+        const auto& vc = s.viewConfig[i];
+        int w = static_cast<int>(vc.recommendedImageRectWidth * s_config.eyeScale + 0.5f);
+        int h = static_cast<int>(vc.recommendedImageRectHeight * s_config.eyeScale + 0.5f);
+        if (w > static_cast<int>(vc.maxImageRectWidth))
+            w = static_cast<int>(vc.maxImageRectWidth);
+        if (h > static_cast<int>(vc.maxImageRectHeight))
+            h = static_cast<int>(vc.maxImageRectHeight);
+        if (!CreateSwapchain(s.eyes[i], w, h, i == 0 ? "eye 0" : "eye 1"))
+            return false;
+    }
     return true;
 }
 
@@ -344,10 +488,21 @@ void LogReferenceSpaces()
     Log("Reference spaces:%s", list.c_str());
 }
 
+bool CreateSpace(XrReferenceSpaceType type, XrSpace& out, const char* what)
+{
+    XrReferenceSpaceCreateInfo rsi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    rsi.referenceSpaceType = type;
+    rsi.poseInReferenceSpace.orientation.w = 1.0f;
+    return Check(xrCreateReferenceSpace(s.session, &rsi, &out), what);
+}
+
 void DestroyAll()
 {
-    if (s.swapchain != XR_NULL_HANDLE)
-        xrDestroySwapchain(s.swapchain);
+    for (Swapchain* sc : {&s.screen, &s.hud, &s.eyes[0], &s.eyes[1]})
+        if (sc->handle != XR_NULL_HANDLE)
+            xrDestroySwapchain(sc->handle);
+    if (s.viewSpace != XR_NULL_HANDLE)
+        xrDestroySpace(s.viewSpace);
     if (s.localSpace != XR_NULL_HANDLE)
         xrDestroySpace(s.localSpace);
     if (s.session != XR_NULL_HANDLE)
@@ -416,29 +571,98 @@ void PollEvents()
     }
 }
 
-void EndFrame(bool withLayer)
+// xrWaitFrame + xrBeginFrame.  Returns the runtime's shouldRender, or false
+// when no frame was begun.
+bool WaitAndBeginFrame(bool stereo)
 {
-    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad)};
-    if (withLayer)
-    {
-        quad.space = s.localSpace;
-        quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quad.subImage.swapchain = s.swapchain;
-        quad.subImage.imageRect = {{0, 0}, {s.swapW, s.swapH}};
-        quad.subImage.imageArrayIndex = 0;
-        quad.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-        quad.pose.position = {0.0f, 0.0f, -kScreenDistance};
-        quad.size = {kScreenMetersW, kScreenMetersH};
-    }
+    PollEvents();
+    if (!s.running)
+        return false;
 
+    const auto waitStart = std::chrono::steady_clock::now();
+    XrFrameState fs{XR_TYPE_FRAME_STATE};
+    if (!Check(xrWaitFrame(s.session, nullptr, &fs), "xrWaitFrame"))
+        return false;
+    const double waitMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
+
+    if (!Check(xrBeginFrame(s.session, nullptr), "xrBeginFrame"))
+        return false;
+    s.frameBegun = true;
+    s.predictedDisplayTime = fs.predictedDisplayTime;
+
+    s.statsFrames++;
+    s.statsWaitMs += waitMs;
+    s.statsPeriodMs += fs.predictedDisplayPeriod / 1.0e6;
+    if (stereo)
+        s.statsStereo++;
+    if (!fs.shouldRender)
+        s.statsSkipped++;
+    if (s.statsFrames == State::kStatsFrames)
+    {
+        Log("Frames: %d (stereo %d), avg xrWaitFrame %.2f ms, avg display period %.2f ms, not rendered %d",
+            s.statsFrames, s.statsStereo, s.statsWaitMs / s.statsFrames, s.statsPeriodMs / s.statsFrames,
+            s.statsSkipped);
+        s.statsFrames = s.statsStereo = s.statsSkipped = 0;
+        s.statsWaitMs = s.statsPeriodMs = 0.0;
+    }
+    return fs.shouldRender;
+}
+
+unsigned int AcquireImage(Swapchain& sc)
+{
+    uint32_t index = 0;
+    XrSwapchainImageAcquireInfo acq{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    if (!Check(xrAcquireSwapchainImage(sc.handle, &acq, &index), "xrAcquireSwapchainImage"))
+        return 0;
+    sc.acquired = true;
+    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wait.timeout = XR_INFINITE_DURATION;
+    if (!Check(xrWaitSwapchainImage(sc.handle, &wait), "xrWaitSwapchainImage"))
+        return 0;
+    return sc.images[index].image;
+}
+
+// Releases every acquired image; returns false if any release failed.
+bool ReleaseImages()
+{
+    bool ok = true;
+    for (Swapchain* sc : {&s.screen, &s.hud, &s.eyes[0], &s.eyes[1]})
+    {
+        if (!sc->acquired)
+            continue;
+        XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        ok = Check(xrReleaseSwapchainImage(sc->handle, &rel), "xrReleaseSwapchainImage") && ok;
+        sc->acquired = false;
+    }
+    return ok;
+}
+
+void EndFrame(uint32_t layerCount, const XrCompositionLayerBaseHeader* const* layers)
+{
     XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
     end.displayTime = s.predictedDisplayTime;
     end.environmentBlendMode = s.blendMode;
-    end.layerCount = withLayer ? 1 : 0;
-    end.layers = withLayer ? layers : nullptr;
+    end.layerCount = layerCount;
+    end.layers = layerCount ? layers : nullptr;
     Check(xrEndFrame(s.session, &end), "xrEndFrame");
     s.frameBegun = false;
+}
+
+// Abandon a begun frame: release whatever was acquired, submit no layers.
+void AbortFrame()
+{
+    ReleaseImages();
+    EndFrame(0, nullptr);
+}
+
+XrSwapchainSubImage SubImage(const Swapchain& sc)
+{
+    XrSwapchainSubImage sub{};
+    sub.swapchain = sc.handle;
+    sub.imageRect = {{0, 0}, {sc.width, sc.height}};
+    sub.imageArrayIndex = 0;
+    return sub;
 }
 
 #endif // _WIN32
@@ -451,6 +675,27 @@ VRSession& VRSession::Instance()
     return instance;
 }
 
+bool VRSession::InitFake()
+{
+    OpenLog();
+    Log("CWR-VR: fake headset (--vr-fake), no OpenXR runtime used");
+    LoadConfig();
+    s_fake = true;
+    Log("Fake eyes: %dx%d, IPD 64 mm, fixed pose", static_cast<int>(kFakeEyeSize * s_config.eyeScale),
+        static_cast<int>(kFakeEyeSize * s_config.eyeScale));
+    return true;
+}
+
+bool VRSession::IsFake() const
+{
+    return s_fake;
+}
+
+const VRConfig& VRSession::Config() const
+{
+    return s_config;
+}
+
 #if defined(_WIN32)
 
 bool VRSession::Init()
@@ -459,7 +704,8 @@ bool VRSession::Init()
         return true;
 
     OpenLog();
-    Log("CWR-VR: starting OpenXR (M1: flat game on a virtual screen)");
+    Log("CWR-VR: starting OpenXR");
+    LoadConfig();
 
     LogApiLayers();
     if (!LogExtensionsAndCheckGL())
@@ -488,14 +734,8 @@ bool VRSession::Init()
 
     XrSystemGetInfo sgi{XR_TYPE_SYSTEM_GET_INFO};
     sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-    if (!Check(xrGetSystem(s.instance, &sgi, &s.systemId), "xrGetSystem (is the headset connected?)"))
-    {
-        DestroyAll();
-        return false;
-    }
-    LogSystem();
-
-    if (!CheckGLRequirements())
+    if (!Check(xrGetSystem(s.instance, &sgi, &s.systemId), "xrGetSystem (is the headset connected?)") ||
+        !LogSystemAndViews() || !CheckGLRequirements())
     {
         DestroyAll();
         return false;
@@ -521,11 +761,9 @@ bool VRSession::Init()
     }
 
     LogReferenceSpaces();
-    XrReferenceSpaceCreateInfo rsi{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
-    rsi.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
-    rsi.poseInReferenceSpace.orientation.w = 1.0f;
-    if (!Check(xrCreateReferenceSpace(s.session, &rsi, &s.localSpace), "xrCreateReferenceSpace(LOCAL)") ||
-        !CreateQuadSwapchain())
+    if (!CreateSpace(XR_REFERENCE_SPACE_TYPE_LOCAL, s.localSpace, "xrCreateReferenceSpace(LOCAL)") ||
+        !CreateSpace(XR_REFERENCE_SPACE_TYPE_VIEW, s.viewSpace, "xrCreateReferenceSpace(VIEW)") ||
+        !CreateSwapchains())
     {
         DestroyAll();
         return false;
@@ -537,86 +775,44 @@ bool VRSession::Init()
 
 void VRSession::Shutdown()
 {
-    if (s.instance == XR_NULL_HANDLE)
+    if (s.instance != XR_NULL_HANDLE)
     {
-        CloseLog();
-        return;
+        if (s.frameBegun)
+            AbortFrame();
+        // xrEndSession is only legal in STOPPING; destroying a running
+        // session is allowed and the runtime tears it down.
+        DestroyAll();
     }
-    if (s.imageAcquired)
-    {
-        XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(s.swapchain, &rel);
-    }
-    // xrEndSession is only legal in STOPPING; destroying a running session
-    // is allowed and the runtime tears it down.
-    DestroyAll();
-    Log("Shutdown complete");
+    if (IsActive() || s_fake || s_log)
+        Log("Shutdown complete");
+    s_fake = false;
     CloseLog();
 }
 
 bool VRSession::IsActive() const
 {
-    return s.instance != XR_NULL_HANDLE;
+    return s_fake || s.instance != XR_NULL_HANDLE;
 }
 
 bool VRSession::BeginFlatFrame(FlatFrameTarget& out)
 {
-    PollEvents();
-    if (!s.running)
+    if (s_fake)
         return false;
-
-    const auto waitStart = std::chrono::steady_clock::now();
-    XrFrameState fs{XR_TYPE_FRAME_STATE};
-    if (!Check(xrWaitFrame(s.session, nullptr, &fs), "xrWaitFrame"))
-        return false;
-    const double waitMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
-
-    if (!Check(xrBeginFrame(s.session, nullptr), "xrBeginFrame"))
-        return false;
-    s.frameBegun = true;
-    s.predictedDisplayTime = fs.predictedDisplayTime;
-
-    s.statsFrames++;
-    s.statsWaitMs += waitMs;
-    s.statsPeriodMs += fs.predictedDisplayPeriod / 1.0e6;
-    if (!fs.shouldRender)
-        s.statsSkipped++;
-    if (s.statsFrames == State::kStatsFrames)
+    if (!WaitAndBeginFrame(false))
     {
-        Log("Frames: %d, avg xrWaitFrame %.2f ms, avg display period %.2f ms, not rendered %d", s.statsFrames,
-            s.statsWaitMs / s.statsFrames, s.statsPeriodMs / s.statsFrames, s.statsSkipped);
-        s.statsFrames = s.statsSkipped = 0;
-        s.statsWaitMs = s.statsPeriodMs = 0.0;
-    }
-
-    if (!fs.shouldRender)
-    {
-        EndFrame(false);
+        if (s.frameBegun)
+            EndFrame(0, nullptr);
         return false;
     }
 
-    uint32_t index = 0;
-    XrSwapchainImageAcquireInfo acq{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (!Check(xrAcquireSwapchainImage(s.swapchain, &acq, &index), "xrAcquireSwapchainImage"))
+    out.glTexture = AcquireImage(s.screen);
+    if (!out.glTexture)
     {
-        EndFrame(false);
+        AbortFrame();
         return false;
     }
-    XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-    wait.timeout = XR_INFINITE_DURATION;
-    if (!Check(xrWaitSwapchainImage(s.swapchain, &wait), "xrWaitSwapchainImage"))
-    {
-        XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(s.swapchain, &rel);
-        EndFrame(false);
-        return false;
-    }
-    s.imageAcquired = true;
-
-    out.glTexture = s.images[index].image;
-    out.width = s.swapW;
-    out.height = s.swapH;
+    out.width = s.screen.width;
+    out.height = s.screen.height;
     return true;
 }
 
@@ -624,14 +820,124 @@ void VRSession::EndFlatFrame()
 {
     if (!s.frameBegun)
         return;
-    bool haveImage = false;
-    if (s.imageAcquired)
+    if (!ReleaseImages())
     {
-        XrSwapchainImageReleaseInfo rel{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        haveImage = Check(xrReleaseSwapchainImage(s.swapchain, &rel), "xrReleaseSwapchainImage");
-        s.imageAcquired = false;
+        EndFrame(0, nullptr);
+        return;
     }
-    EndFrame(haveImage);
+
+    const float w = s_config.screenWidth;
+    XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quad.space = s.localSpace;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.subImage = SubImage(s.screen);
+    quad.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    quad.pose.position = {0.0f, 0.0f, -s_config.screenDistance};
+    quad.size = {w, w * kScreenPixelsH / kScreenPixelsW};
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad)};
+    EndFrame(1, layers);
+}
+
+bool VRSession::BeginStereoFrame(StereoFrame& out)
+{
+    if (s_fake)
+    {
+        FillFakeFrame(out);
+        return true;
+    }
+    if (!WaitAndBeginFrame(true))
+    {
+        if (s.frameBegun)
+            EndFrame(0, nullptr);
+        return false;
+    }
+
+    XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
+    li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    li.displayTime = s.predictedDisplayTime;
+    li.space = s.localSpace;
+    XrViewState vs{XR_TYPE_VIEW_STATE};
+    uint32_t count = 0;
+    s.views[0] = s.views[1] = XrView{XR_TYPE_VIEW};
+    if (!Check(xrLocateViews(s.session, &li, &vs, 2, &count, s.views), "xrLocateViews") ||
+        !(vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT))
+    {
+        // Tracking lost: nothing sensible to render this frame.
+        EndFrame(0, nullptr);
+        return false;
+    }
+
+    for (int i = 0; i < 2; ++i)
+    {
+        const XrView& v = s.views[i];
+        EyeView& e = out.eyes[i];
+        e.orientation[0] = v.pose.orientation.x;
+        e.orientation[1] = v.pose.orientation.y;
+        e.orientation[2] = v.pose.orientation.z;
+        e.orientation[3] = v.pose.orientation.w;
+        e.position[0] = v.pose.position.x;
+        e.position[1] = v.pose.position.y;
+        e.position[2] = v.pose.position.z;
+        e.tanLeft = std::tan(v.fov.angleLeft);
+        e.tanRight = std::tan(v.fov.angleRight);
+        e.tanUp = std::tan(v.fov.angleUp);
+        e.tanDown = std::tan(v.fov.angleDown);
+        out.eyeTexture[i] = AcquireImage(s.eyes[i]);
+    }
+    out.eyeWidth = s.eyes[0].width;
+    out.eyeHeight = s.eyes[0].height;
+    out.hudTexture = AcquireImage(s.hud);
+    out.hudWidth = s.hud.width;
+    out.hudHeight = s.hud.height;
+
+    if (!out.eyeTexture[0] || !out.eyeTexture[1] || !out.hudTexture)
+    {
+        AbortFrame();
+        return false;
+    }
+    return true;
+}
+
+void VRSession::EndStereoFrame(float hudHalfTanX, float hudHalfTanY)
+{
+    if (s_fake || !s.frameBegun)
+        return;
+    if (!ReleaseImages())
+    {
+        EndFrame(0, nullptr);
+        return;
+    }
+
+    XrCompositionLayerProjectionView pv[2] = {{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+                                              {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    for (int i = 0; i < 2; ++i)
+    {
+        // Must be exactly the pose and FOV the eye was rendered with.
+        pv[i].pose = s.views[i].pose;
+        pv[i].fov = s.views[i].fov;
+        pv[i].subImage = SubImage(s.eyes[i]);
+    }
+    XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    proj.space = s.localSpace;
+    proj.viewCount = 2;
+    proj.views = pv;
+
+    // Head-locked HUD sized so its angular extent matches the HUD camera's
+    // FOV: world-space markers drawn by the HUD then line up with the scene.
+    const float d = s_config.hudDistance;
+    XrCompositionLayerQuad hud{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    hud.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                     XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+    hud.space = s.viewSpace;
+    hud.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    hud.subImage = SubImage(s.hud);
+    hud.pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    hud.pose.position = {0.0f, 0.0f, -d};
+    hud.size = {2.0f * d * hudHalfTanX, 2.0f * d * hudHalfTanY};
+
+    const XrCompositionLayerBaseHeader* layers[] = {reinterpret_cast<XrCompositionLayerBaseHeader*>(&proj),
+                                                    reinterpret_cast<XrCompositionLayerBaseHeader*>(&hud)};
+    EndFrame(2, layers);
 }
 
 #else // !_WIN32
@@ -639,16 +945,22 @@ void VRSession::EndFlatFrame()
 bool VRSession::Init()
 {
     OpenLog();
-    Log("CWR-VR: VR is only implemented on Windows so far. Continuing flat.");
+    Log("CWR-VR: OpenXR is only implemented on Windows so far. Continuing flat (--vr-fake still works).");
     CloseLog();
     return false;
 }
 
-void VRSession::Shutdown() {}
+void VRSession::Shutdown()
+{
+    if (s_fake)
+        Log("Shutdown complete");
+    s_fake = false;
+    CloseLog();
+}
 
 bool VRSession::IsActive() const
 {
-    return false;
+    return s_fake;
 }
 
 bool VRSession::BeginFlatFrame(FlatFrameTarget&)
@@ -657,6 +969,16 @@ bool VRSession::BeginFlatFrame(FlatFrameTarget&)
 }
 
 void VRSession::EndFlatFrame() {}
+
+bool VRSession::BeginStereoFrame(StereoFrame& out)
+{
+    if (!s_fake)
+        return false;
+    FillFakeFrame(out);
+    return true;
+}
+
+void VRSession::EndStereoFrame(float, float) {}
 
 #endif // _WIN32
 

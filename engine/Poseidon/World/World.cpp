@@ -1350,212 +1350,226 @@ void World::Simulate(float deltaT, bool& enableDraw)
     }
 #endif
 
-    if (enableDraw)
+    // VR: the 3D scene is drawn once per eye in a stereo frame; flat play
+    // and frames without stereo draw it once, as before.
+    const int scenePasses = enableDraw ? GEngine->VRScenePassCount() : 1;
+    for (int scenePass = 0; scenePass < scenePasses; ++scenePass)
     {
-        _scene.BeginObjects();
-        DrawViewerSceneAddons();
-    }
-
-    if (camInsideVehicle)
-    {
-        _scene.SelectActiveLights(camInsideVehicle);
-    }
-    else
-    {
-        _scene.SelectActiveLights(nullptr);
-    }
-    perf.Mark(Dev::FrameProfiler::PhaseDrawInit);
-
-    if (_scene.GetLandscape())
-    {
-        // remove all vehicles that should be removed
-        MoveOutAndDelete(_vehicles, 0);
-        MoveOutAndDelete(_animals, 0);
-        MoveOutAndDelete(_fastVehicles, 0);
-        MoveOutAndDelete(_buildings, 0);
+        GEngine->VRBeginScenePass(scenePass, *_scene.GetCamera());
 
         if (enableDraw)
         {
-            if (!_showMap && IsDisplayEnabled())
-            {
-                {
-                    LandBegEnd objBegEnd;
-                    Landscape::CalculBoundingRect(objBegEnd, *_scene.GetCamera(), _scene.GetFogMaxRange(), ObjGrid);
+            _scene.BeginObjects();
+            DrawViewerSceneAddons();
+        }
 
-                    int x, z;
-                    int xMin = objBegEnd.xBeg, xMax = objBegEnd.xEnd;
-                    int zMin = objBegEnd.zBeg, zMax = objBegEnd.zEnd;
-                    if (GScene->GetObjectShadows() || GScene->GetVehicleShadows())
+        if (camInsideVehicle)
+        {
+            _scene.SelectActiveLights(camInsideVehicle);
+        }
+        else
+        {
+            _scene.SelectActiveLights(nullptr);
+        }
+        perf.Mark(Dev::FrameProfiler::PhaseDrawInit);
+
+        if (_scene.GetLandscape())
+        {
+            // remove all vehicles that should be removed
+            MoveOutAndDelete(_vehicles, 0);
+            MoveOutAndDelete(_animals, 0);
+            MoveOutAndDelete(_fastVehicles, 0);
+            MoveOutAndDelete(_buildings, 0);
+
+            if (enableDraw)
+            {
+                if (!_showMap && IsDisplayEnabled())
+                {
                     {
-#define SHADOW_BORDER 2
-                        xMin -= SHADOW_BORDER, xMax += SHADOW_BORDER;
-                        zMin -= SHADOW_BORDER, zMax += SHADOW_BORDER;
-                    }
-                    if (xMin < 0)
-                    {
-                        xMin = 0;
-                    }
-                    if (xMin > ObjRange - 1)
-                    {
-                        xMin = ObjRange - 1;
-                    }
-                    if (xMax < 0)
-                    {
-                        xMax = 0;
-                    }
-                    if (xMax > ObjRange - 1)
-                    {
-                        xMax = ObjRange - 1;
-                    }
-                    if (zMin < 0)
-                    {
-                        zMin = 0;
-                    }
-                    if (zMin > ObjRange - 1)
-                    {
-                        zMin = ObjRange - 1;
-                    }
-                    if (zMax < 0)
-                    {
-                        zMax = 0;
-                    }
-                    if (zMax > ObjRange - 1)
-                    {
-                        zMax = ObjRange - 1;
-                    }
-#define RECT_CLIPPERS 1
-                    for (z = zMin; z <= zMax; z++)
-                    {
-                        for (x = xMin; x <= xMax; x++)
+                        LandBegEnd objBegEnd;
+                        Landscape::CalculBoundingRect(objBegEnd, *_scene.GetCamera(), _scene.GetFogMaxRange(), ObjGrid);
+
+                        int x, z;
+                        int xMin = objBegEnd.xBeg, xMax = objBegEnd.xEnd;
+                        int zMin = objBegEnd.zBeg, zMax = objBegEnd.zEnd;
+                        if (GScene->GetObjectShadows() || GScene->GetVehicleShadows())
                         {
-                            // build if necessary
-                            const ObjectList& list = GLandscape->GetObjects(z, x);
-                            if (list.Null())
+#define SHADOW_BORDER 2
+                            xMin -= SHADOW_BORDER, xMax += SHADOW_BORDER;
+                            zMin -= SHADOW_BORDER, zMax += SHADOW_BORDER;
+                        }
+                        if (xMin < 0)
+                        {
+                            xMin = 0;
+                        }
+                        if (xMin > ObjRange - 1)
+                        {
+                            xMin = ObjRange - 1;
+                        }
+                        if (xMax < 0)
+                        {
+                            xMax = 0;
+                        }
+                        if (xMax > ObjRange - 1)
+                        {
+                            xMax = ObjRange - 1;
+                        }
+                        if (zMin < 0)
+                        {
+                            zMin = 0;
+                        }
+                        if (zMin > ObjRange - 1)
+                        {
+                            zMin = ObjRange - 1;
+                        }
+                        if (zMax < 0)
+                        {
+                            zMax = 0;
+                        }
+                        if (zMax > ObjRange - 1)
+                        {
+                            zMax = ObjRange - 1;
+                        }
+#define RECT_CLIPPERS 1
+                        for (z = zMin; z <= zMax; z++)
+                        {
+                            for (x = xMin; x <= xMax; x++)
                             {
-                                continue;
-                            }
-                            Vector3Val bCenter = list->GetBSphereCenter();
-                            float bRadius = list->GetBSphereRadius();
-                            // Point3 cPos(VFastTransform,GScene->ScaledInvTransform(),bCenter);
-                            const Camera& cam = *GScene->GetCamera();
-#if RECT_CLIPPERS
-                            ClipFlags andClip = cam.IsClipped(bCenter, bRadius, 1);
-                            if (andClip && list->GetNonStaticCount() <= 0)
-                            {
-                                continue;
-                            }
-#endif
-                            ClipFlags orClip = cam.MayBeClipped(bCenter, bRadius, 1);
-                            int n = list.Size();
-                            for (int i = 0; i < n; i++)
-                            {
-                                Object* obj = list[i];
-                                PoseidonAssert(obj);
-                                if (obj->Invisible())
+                                // build if necessary
+                                const ObjectList& list = GLandscape->GetObjects(z, x);
+                                if (list.Null())
                                 {
                                     continue;
                                 }
-                                ClipFlags clip = orClip;
+                                Vector3Val bCenter = list->GetBSphereCenter();
+                                float bRadius = list->GetBSphereRadius();
+                                // Point3 cPos(VFastTransform,GScene->ScaledInvTransform(),bCenter);
+                                const Camera& cam = *GScene->GetCamera();
 #if RECT_CLIPPERS
-                                if (obj->Static())
+                                ClipFlags andClip = cam.IsClipped(bCenter, bRadius, 1);
+                                if (andClip && list->GetNonStaticCount() <= 0)
                                 {
-                                    if (andClip)
+                                    continue;
+                                }
+#endif
+                                ClipFlags orClip = cam.MayBeClipped(bCenter, bRadius, 1);
+                                int n = list.Size();
+                                for (int i = 0; i < n; i++)
+                                {
+                                    Object* obj = list[i];
+                                    PoseidonAssert(obj);
+                                    if (obj->Invisible())
                                     {
                                         continue;
                                     }
-                                }
-                                else
-                                {
-                                    clip = ClipAll;
-                                }
-#endif
-                                if (obj == camInsideVehicle)
-                                {
-                                    _scene.ObjectForDrawing(obj, obj->InsideLOD(_camType), clip);
-#if _ENABLE_CHEATS
-                                    if (DiagMode)
+                                    ClipFlags clip = orClip;
+#if RECT_CLIPPERS
+                                    if (obj->Static())
                                     {
-                                        obj->DrawDiags();
+                                        if (andClip)
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        clip = ClipAll;
                                     }
 #endif
-                                }
-                                else
-                                {
-                                    _scene.ObjectForDrawing(obj, -1, clip);
-#if _ENABLE_CHEATS
-                                    if (DiagMode)
+                                    if (obj == camInsideVehicle)
                                     {
-                                        obj->DrawDiags();
-                                    }
+                                        _scene.ObjectForDrawing(obj, obj->InsideLOD(_camType), clip);
+#if _ENABLE_CHEATS
+                                        if (DiagMode)
+                                        {
+                                            obj->DrawDiags();
+                                        }
 #endif
+                                    }
+                                    else
+                                    {
+                                        _scene.ObjectForDrawing(obj, -1, clip);
+#if _ENABLE_CHEATS
+                                        if (DiagMode)
+                                        {
+                                            obj->DrawDiags();
+                                        }
+#endif
+                                    }
                                 }
                             }
                         }
+                        for (int i = 0; i < NCloudlets(); i++)
+                        {
+                            _scene.CloudletForDrawing(GetCloudlet(i));
+                        }
+                        _scene.EndObjects(); // prepare objects for drawing
+
+                        GEngine->EnableReorderQueues(true);
                     }
-                    for (int i = 0; i < NCloudlets(); i++)
+
+                    perf.Mark(Dev::FrameProfiler::PhaseDrawObjPrep);
+                    _scene.GetLandscape()->Draw(_scene);
+                    perf.Mark(Dev::FrameProfiler::PhaseDrawLandscape);
+
+                    GEngine->EnableReorderQueues(false);
+                    GEngine->FlushQueues();
+
+                    _scene.ObjectsDrawn();
+                    GEngine->FlushQueues();
+
+                    // Frame validation — ExtractSceneInputs → BuildFrame →
+                    // ValidateFrame + runtime checks, after the world's
+                    // pixels have landed.  See the matching call below.
+                    if (GEngine)
+                        render::frame::ObserveRenderedFrame(*GEngine, _scene);
+                    perf.Mark(Dev::FrameProfiler::PhaseDrawObjects);
+                    GEngine->EnableNightEye(0);
+
+                    if (_cameraEffect)
                     {
-                        _scene.CloudletForDrawing(GetCloudlet(i));
+                        _cameraEffect->Draw();
                     }
-                    _scene.EndObjects(); // prepare objects for drawing
-
-                    GEngine->EnableReorderQueues(true);
                 }
-
-                perf.Mark(Dev::FrameProfiler::PhaseDrawObjPrep);
-                _scene.GetLandscape()->Draw(_scene);
-                perf.Mark(Dev::FrameProfiler::PhaseDrawLandscape);
-
-                GEngine->EnableReorderQueues(false);
-                GEngine->FlushQueues();
-
+                if (!IsDisplayEnabled())
+                {
+                    ProgressDraw();
+                }
+            } // if (enableDraw)
+            else
+            {
+                _scene.CleanUp();
+            }
+        }
+        else
+        {
+            if (enableDraw)
+            {
+                _scene.EndObjects(); // prepare objects for drawing
+                _scene.DrawObjectsAndShadowsPass1();
+                _scene.DrawObjectsAndShadowsPass2();
                 _scene.ObjectsDrawn();
-                GEngine->FlushQueues();
 
                 // Frame validation — ExtractSceneInputs → BuildFrame →
-                // ValidateFrame + runtime checks, after the world's
-                // pixels have landed.  See the matching call below.
+                // ValidateFrame + runtime checks.  The wrapper lives in
+                // WorldFrameObserver.cpp so this translation unit doesn't
+                // need EngineGL33.hpp (which collides with appGlobalsShim's
+                // GApp->m_keepFocus macro).  Per-frame stats are surfaced
+                // via --render-frame-log (AppConfig flag), default off.
                 if (GEngine)
                     render::frame::ObserveRenderedFrame(*GEngine, _scene);
-                perf.Mark(Dev::FrameProfiler::PhaseDrawObjects);
-                GEngine->EnableNightEye(0);
-
-                if (_cameraEffect)
-                {
-                    _cameraEffect->Draw();
-                }
             }
-            if (!IsDisplayEnabled())
+            else
             {
-                ProgressDraw();
+                _scene.CleanUp();
             }
-        } // if (enableDraw)
-        else
-        {
-            _scene.CleanUp();
         }
     }
-    else
-    {
-        if (enableDraw)
-        {
-            _scene.EndObjects(); // prepare objects for drawing
-            _scene.DrawObjectsAndShadowsPass1();
-            _scene.DrawObjectsAndShadowsPass2();
-            _scene.ObjectsDrawn();
 
-            // Frame validation — ExtractSceneInputs → BuildFrame →
-            // ValidateFrame + runtime checks.  The wrapper lives in
-            // WorldFrameObserver.cpp so this translation unit doesn't
-            // need EngineGL33.hpp (which collides with appGlobalsShim's
-            // GApp->m_keepFocus macro).  Per-frame stats are surfaced
-            // via --render-frame-log (AppConfig flag), default off.
-            if (GEngine)
-                render::frame::ObserveRenderedFrame(*GEngine, _scene);
-        }
-        else
-        {
-            _scene.CleanUp();
-        }
+    // VR: HUD and UI go to their own layer, drawn once.
+    if (enableDraw)
+    {
+        GEngine->VRBeginHUDPass(*_scene.GetCamera());
     }
 
     perf.Mark(Dev::FrameProfiler::PhaseDrawPost);

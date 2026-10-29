@@ -1,6 +1,7 @@
 #include <PoseidonGL33/EngineGL33.hpp>
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Core/Config/EngineConfig.hpp>
+#include <Poseidon/Foundation/Platform/AppConfig.hpp> // VR: --vr picks the GL version
 #include <Poseidon/Graphics/Shared/WindowPlacement.hpp>
 
 #include <SDL3/SDL.h>
@@ -274,8 +275,11 @@ EngineGL33::EngineGL33(int width, int height, bool windowed, int bpp)
     }
 
     // Request OpenGL 3.3 Core Profile
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    // VR: OpenXR runtimes ask for 4.0+ (VDXR: 4.0 .. 5.0).  4.5 core is a
+    // superset of what the engine uses; 3.3 stays the fallback below.
+    const bool vrContext = Poseidon::Foundation::AppConfig::Instance().IsVREnabled();
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, vrContext ? 4 : 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, vrContext ? 5 : 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     // Forward-compatible flag is required by Apple's GL implementation
@@ -384,6 +388,14 @@ EngineGL33::EngineGL33(int width, int height, bool windowed, int bpp)
 
     // Create OpenGL context
     _glContext = SDL_GL_CreateContext(_sdlWindow);
+    if (!_glContext && vrContext)
+    {
+        // VR: driver without 4.5 core; VR may still work on 3.3 (see vr.log).
+        LOG_WARN(Graphics, "VR: OpenGL 4.5 context failed ({}), falling back to 3.3", SDL_GetError());
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        _glContext = SDL_GL_CreateContext(_sdlWindow);
+    }
     if (!_glContext)
     {
         LOG_ERROR(Graphics, "GL33: SDL_GL_CreateContext failed: {}", SDL_GetError());

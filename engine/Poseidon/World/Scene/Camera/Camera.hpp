@@ -46,6 +46,12 @@ class Camera: public FrameBase
 
 	bool _userClip;
 
+	// VR: asymmetric frustum (tangents of the HMD eye FOV).  _cLeft/_cTop
+	// then hold the enclosing symmetric frustum, so clipping and culling
+	// stay conservative; only the projection matrices use the real edges.
+	bool _asymmetric = false;
+	Coord _tanLeft = 0, _tanRight = 0, _tanDown = 0, _tanUp = 0;
+
 	public:
 	// properties
 	Camera();
@@ -62,6 +68,9 @@ class Camera: public FrameBase
 	// the one place aspect enters the camera (left = fov * leftFOV,
 	// top = fov * topFOV from the engine's AspectSettings).
 	void SetPerspectiveForView( Engine *engine, Coord cNear, Coord cFar, Coord fov );
+	// VR: per-eye frustum from FOV tangents (tanLeft/tanDown negative).
+	// Call after SetPerspective, before Adjust; SetPerspective clears it.
+	void SetAsymmetricFrustum( Coord tanLeft, Coord tanRight, Coord tanDown, Coord tanUp );
 	void Adjust( Engine *engine );
 	void SetClipRange( Coord cNear, Coord cFar );
 	void SetAdditionalClipping(float cNear, Coord cFar );
