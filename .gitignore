@@ -20,6 +20,7 @@ lock*.txt
 imgui.ini
 .trident.env
 .trident_history
+vr.local.ini
 
 # Local game data and fixtures
 /assets/
