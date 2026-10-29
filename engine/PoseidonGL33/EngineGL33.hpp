@@ -603,6 +603,7 @@ class EngineGL33 : public Engine
     void VRBeginScenePass(int pass, Camera& camera) override;
     void VRBeginHUDPass(Camera& camera) override;
     bool VRAimDirection(Vector3& dir) const override;
+    bool VRWeaponPose(Matrix4& world) const override;
 
   protected:
 

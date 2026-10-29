@@ -787,6 +787,48 @@ const AnimationRTWeight& Man::GetProxyWeights(int level, const ProxyObject& prox
     return GetSelWeights(level, proxy.selection);
 }
 
+// VR: see SoldierOld.hpp.  The engine's weapon pose is in world space with
+// +Z along the barrel; proxy matrices are in this soldier's model space, and
+// the barrel runs along the muzzle direction of the weapon's own model (not
+// necessarily +Z), so the proxy frame is turned to put that axis on the
+// controller's aim.  Proxy +Y is taken as the weapon's up.
+Matrix4 Man::AnimateProxyMatrix(int level, const ProxyObject& proxy) const
+{
+    Matrix4 vrWeapon;
+    if (IsVRHeldWeaponProxy(level, proxy) && GEngine->VRWeaponPose(vrWeapon))
+    {
+        Vector3 barrel = GetMagazineSlot(_currentWeapon)._muzzle->_muzzleDir;
+        if (barrel.SquareSize() < 1e-6f)
+            barrel = VForward;
+        Matrix3 proxyAxes;
+        proxyAxes.SetDirectionAndUp(barrel, VUp);
+        vrWeapon.SetOrientation(vrWeapon.Orientation() * proxyAxes.InverseRotation());
+        return GetInvTransform() * vrWeapon;
+    }
+    return base::AnimateProxyMatrix(level, proxy);
+}
+
+// VR: only the proxy of the weapon in hand (a launcher on the back or a
+// holstered pistol stays where the animation puts it), only for the player
+// seen from their own eyes.
+bool Man::IsVRHeldWeaponProxy(int level, const ProxyObject& proxy) const
+{
+    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0)
+        return false;
+    const WeaponType* weapon = GetMagazineSlot(_currentWeapon)._weapon;
+    if (!weapon)
+        return false;
+    const int matIndex = GetProxyWeights(level, proxy)[0].GetSel();
+    const ManType* type = Type();
+    if (weapon->_weaponType & MaskSlotPrimary)
+        return matIndex == type->_gunMatIndex;
+    if (weapon->_weaponType & MaskSlotSecondary)
+        return matIndex == type->_rpgMatIndex;
+    if (weapon->_weaponType & MaskSlotHandGun)
+        return matIndex == type->_rightHandMatIndex;
+    return false;
+}
+
 void Man::AnimateMatrix(Matrix4& mat, int level, int selection) const
 {
     const AnimationRTWeight& wg = GetSelWeights(level, selection);

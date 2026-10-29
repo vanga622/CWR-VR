@@ -119,6 +119,10 @@ const ConfigKey kConfigKeys[] = {
     {"controls", "smooth_speed", &VRConfig::smoothSpeed, "smooth turn speed, degrees per second"},
     {"controls", "head_locomotion", &VRConfig::headLocomotion,
      "1 = left stick moves where you look, 0 = where the body faces"},
+    {"weapon", "offset_forward", &VRConfig::weaponForward, "weapon centre ahead of the right hand, metres"},
+    {"weapon", "offset_up", &VRConfig::weaponUp, "weapon centre above the right hand, metres"},
+    {"weapon", "offset_right", &VRConfig::weaponRight, "weapon centre right of the right hand, metres"},
+    {"weapon", "two_handed", &VRConfig::twoHanded, "1 = left grip near the weapon aims it with both hands"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -166,6 +170,7 @@ void LoadConfig()
 
     std::string section;
     char line[256];
+    size_t found = 0;
     while (std::fgets(line, sizeof(line), f))
     {
         std::string s(line);
@@ -185,9 +190,21 @@ void LoadConfig()
         const float value = static_cast<float>(std::atof(s.c_str() + eq + 1));
         for (const auto& k : kConfigKeys)
             if (section == k.section && key == k.key)
+            {
                 s_config.*k.field = value;
+                ++found;
+            }
     }
     std::fclose(f);
+
+    // A vr.ini from an older build lacks the newer keys: write them in
+    // (with the values just read) so they can be found and edited.
+    if (found < std::size(kConfigKeys))
+    {
+        WriteConfig(path, s_config);
+        Log("vr.ini: added %d missing keys with default values",
+            static_cast<int>(std::size(kConfigKeys) - found));
+    }
 
     if (s_config.eyeScale < 0.2f || s_config.eyeScale > 2.0f)
         s_config.eyeScale = VRConfig{}.eyeScale;
@@ -215,6 +232,23 @@ void FillFakeFrame(StereoFrame& out)
         e.tanUp = 0.96f;
         e.tanDown = -1.1f;
     }
+    // Scripted hands: rifle held at the hip-to-chest, pointing ahead; left
+    // hand under the fore-end.
+    const float handPos[2][3] = {{-0.02f, -0.30f, -0.62f}, {0.10f, -0.32f, -0.30f}};
+    for (int i = 0; i < 2; ++i)
+    {
+        for (HandPose* p : {&out.grip[i], &out.aim[i]})
+        {
+            *p = HandPose{};
+            p->valid = true;
+            p->position[0] = handPos[i][0];
+            p->position[1] = handPos[i][1];
+            p->position[2] = handPos[i][2];
+        }
+    }
+    // Left grip held, so the two-handed path is what the screenshots show.
+    s_controllers = ControllerState{};
+    s_controllers.grip[0] = 1.0f;
     out.eyeWidth = out.eyeHeight = static_cast<int>(kFakeEyeSize * s_config.eyeScale);
     out.eyeTexture[0] = out.eyeTexture[1] = 0;
     out.hudTexture = 0;
@@ -266,6 +300,9 @@ struct State
     XrAction trigger = XR_NULL_HANDLE, grip = XR_NULL_HANDLE, thumbClick = XR_NULL_HANDLE;
     XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE, btnY = XR_NULL_HANDLE;
     XrAction menu = XR_NULL_HANDLE;
+    XrAction gripPose = XR_NULL_HANDLE, aimPose = XR_NULL_HANDLE;
+    XrSpace gripSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrSpace aimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool frameBegun = false;
     XrTime predictedDisplayTime = 0;
 
@@ -583,7 +620,9 @@ bool CreateActions()
         !CreateAction(s.btnB, "button_b", "B", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
         !CreateAction(s.btnX, "button_x", "X", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
         !CreateAction(s.btnY, "button_y", "Y", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
-        !CreateAction(s.menu, "menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, false))
+        !CreateAction(s.menu, "menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
+        !CreateAction(s.gripPose, "grip_pose", "Hand grip pose", XR_ACTION_TYPE_POSE_INPUT, true) ||
+        !CreateAction(s.aimPose, "aim_pose", "Hand aim pose", XR_ACTION_TYPE_POSE_INPUT, true))
         return false;
 
     const std::vector<Binding> common = {
@@ -597,6 +636,10 @@ bool CreateActions()
         {&s.thumbClick, "/user/hand/right/input/thumbstick/click"},
         {&s.btnA, "/user/hand/right/input/a/click"},
         {&s.btnB, "/user/hand/right/input/b/click"},
+        {&s.gripPose, "/user/hand/left/input/grip/pose"},
+        {&s.gripPose, "/user/hand/right/input/grip/pose"},
+        {&s.aimPose, "/user/hand/left/input/aim/pose"},
+        {&s.aimPose, "/user/hand/right/input/aim/pose"},
     };
     std::vector<Binding> touch = common;
     touch.push_back({&s.btnX, "/user/hand/left/input/x/click"});
@@ -613,7 +656,43 @@ bool CreateActions()
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     attach.countActionSets = 1;
     attach.actionSets = &s.actionSet;
-    return Check(xrAttachSessionActionSets(s.session, &attach), "xrAttachSessionActionSets");
+    if (!Check(xrAttachSessionActionSets(s.session, &attach), "xrAttachSessionActionSets"))
+        return false;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        XrActionSpaceCreateInfo si{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        si.subactionPath = s.hands[i];
+        si.poseInActionSpace.orientation.w = 1.0f;
+        si.action = s.gripPose;
+        if (!Check(xrCreateActionSpace(s.session, &si, &s.gripSpace[i]), "xrCreateActionSpace(grip)"))
+            return false;
+        si.action = s.aimPose;
+        if (!Check(xrCreateActionSpace(s.session, &si, &s.aimSpace[i]), "xrCreateActionSpace(aim)"))
+            return false;
+    }
+    return true;
+}
+
+void LocateHand(XrSpace space, HandPose& out)
+{
+    out = HandPose{};
+    if (space == XR_NULL_HANDLE || s.sessionState != XR_SESSION_STATE_FOCUSED)
+        return;
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(space, s.localSpace, s.predictedDisplayTime, &loc)))
+        return;
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if ((loc.locationFlags & need) != need)
+        return;
+    out.valid = true;
+    out.orientation[0] = loc.pose.orientation.x;
+    out.orientation[1] = loc.pose.orientation.y;
+    out.orientation[2] = loc.pose.orientation.z;
+    out.orientation[3] = loc.pose.orientation.w;
+    out.position[0] = loc.pose.position.x;
+    out.position[1] = loc.pose.position.y;
+    out.position[2] = loc.pose.position.z;
 }
 
 void LogInteractionProfiles()
@@ -692,6 +771,13 @@ void SyncControllers()
 
 void DestroyAll()
 {
+    for (int i = 0; i < 2; ++i)
+    {
+        if (s.gripSpace[i] != XR_NULL_HANDLE)
+            xrDestroySpace(s.gripSpace[i]);
+        if (s.aimSpace[i] != XR_NULL_HANDLE)
+            xrDestroySpace(s.aimSpace[i]);
+    }
     if (s.actionSet != XR_NULL_HANDLE)
         xrDestroyActionSet(s.actionSet); // also destroys its actions
     s_controllers = ControllerState{};
@@ -1128,6 +1214,8 @@ bool VRSession::BeginStereoFrame(StereoFrame& out)
         e.tanUp = std::tan(v.fov.angleUp);
         e.tanDown = std::tan(v.fov.angleDown);
         out.eyeTexture[i] = AcquireImage(s.eyes[i]);
+        LocateHand(s.gripSpace[i], out.grip[i]);
+        LocateHand(s.aimSpace[i], out.aim[i]);
     }
     out.eyeWidth = s.eyes[0].width;
     out.eyeHeight = s.eyes[0].height;

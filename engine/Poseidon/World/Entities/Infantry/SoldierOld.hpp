@@ -952,6 +952,10 @@ class Man: public Person
 
 	const AnimationRTWeight &GetSelWeights( int level, int selection ) const;
 	const AnimationRTWeight &GetProxyWeights( int level, const ProxyObject &proxy ) const;
+	// VR: the player's current weapon follows the right controller in first
+	// person; drawing, muzzle point and fire direction all go through here.
+	Matrix4 AnimateProxyMatrix( int level, const ProxyObject &proxy ) const override;
+	bool IsVRHeldWeaponProxy( int level, const ProxyObject &proxy ) const;
 	void AnimateMatrix( Matrix4 &mat, int level, int selection ) const override;
 
 	void AnimateMatrix( Matrix4 &mat, const AnimationRTWeight &wgt ) const;

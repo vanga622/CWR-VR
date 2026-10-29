@@ -389,6 +389,10 @@ class Engine : public IGraphicsEngine
     // VR: world-space direction the player aims with (the head for now),
     // replacing the mouse cursor; false when not in VR.
     virtual bool VRAimDirection(Vector3& /*dir*/) const { return false; }
+    // VR: world transform of the weapon held in the right controller
+    // (+Z = barrel), placed at the weapon model's centre; false when there
+    // is no tracked hand.
+    virtual bool VRWeaponPose(Matrix4& /*world*/) const { return false; }
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

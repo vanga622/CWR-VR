@@ -179,6 +179,11 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw)
     s_moveYaw = cfg.headLocomotion >= 0.5f ? WrapAngle(s_playerYaw + headYaw - gameYaw) : 0.0f;
 }
 
+// Weapon in the right hand (M4).
+bool s_weaponValid = false;
+Matrix4 s_weaponWorld;
+
+
 void DestroyEyeTarget(EyeTarget& t)
 {
     if (t.fbo)
@@ -266,6 +271,43 @@ void PlaceCamera(Camera& camera, const Matrix3& headOrientation, const Vector3& 
     t.SetOrientation(s_bodyYaw * headOrientation);
     t.SetPosition(s_gameCamera.Position() + s_bodyYaw * headPosition);
     camera.SetTransform(t);
+}
+
+// Tracking-space position -> world, the same mapping the eyes use.
+Vector3 TrackedToWorld(const float p[3])
+{
+    return s_gameCamera.Position() + s_bodyYaw * (ToEnginePosition(p) - s_headOrigin);
+}
+
+// The weapon points along the right controller's aim ray, its grip in the
+// right hand.  With the left grip held near the weapon, the barrel instead
+// runs from the right hand through the left one (two-handed hold).
+void UpdateWeaponPose()
+{
+    s_weaponValid = false;
+    const PoseidonVR::HandPose& aim = s_frame.aim[1];
+    const PoseidonVR::HandPose& grip = s_frame.grip[1];
+    if (!aim.valid || !grip.valid)
+        return;
+
+    auto& vr = PoseidonVR::VRSession::Instance();
+    const PoseidonVR::VRConfig& cfg = vr.Config();
+    Matrix3 orient = s_bodyYaw * ToEngineOrientation(aim.orientation);
+    const Vector3 hand = TrackedToWorld(grip.position);
+
+    const PoseidonVR::HandPose& support = s_frame.grip[0];
+    if (cfg.twoHanded >= 0.5f && vr.Controllers().grip[0] > 0.5f && support.valid)
+    {
+        Vector3 dir = TrackedToWorld(support.position) - hand;
+        const float len = dir.Size();
+        if (len > 0.12f && len < 0.9f)
+            orient.SetDirectionAndUp(dir * (1.0f / len), orient.DirectionUp());
+    }
+
+    s_weaponWorld.SetOrientation(orient);
+    s_weaponWorld.SetPosition(hand + orient.Direction() * cfg.weaponForward + orient.DirectionUp() * cfg.weaponUp +
+                              orient.DirectionAside() * cfg.weaponRight);
+    s_weaponValid = true;
 }
 
 // Raw byte copies between framebuffers: no scissor, no sRGB encoding of an
@@ -393,6 +435,7 @@ void EngineGL33::ShutdownVR()
         Poseidon::Dev::DebugOverlay::SetExtraTab(nullptr, nullptr);
     s_gamepad.Destroy();
     s_aimValid = false;
+    s_weaponValid = false;
     for (EyeTarget& t : s_eyes)
         DestroyEyeTarget(t);
     if (_vrBlitFbo)
@@ -416,8 +459,9 @@ int EngineGL33::VRScenePassCount()
     _vrFrameAttempted = true;
     if (!PoseidonVR::VRSession::Instance().BeginStereoFrame(s_frame))
     {
-        // No head pose this frame: leave aiming to the mouse.
+        // No head pose this frame: leave aiming and the weapon to the game.
         s_aimValid = false;
+        s_weaponValid = false;
         return 1;
     }
     // The XR frame is begun: from here it is submitted in SubmitVRFrame even
@@ -445,6 +489,7 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         const Vector3 headPos = (ToEnginePosition(eyes[0].position) + ToEnginePosition(eyes[1].position)) * 0.5f;
         UpdateHeading(HeadingOf(ToEngineOrientation(eyes[0].orientation)), headPos, HeadingOf(s_gameCamera.Orientation()));
         s_bodyYaw = YawMatrix(s_playerYaw);
+        UpdateWeaponPose();
     }
 
     // Whatever is still queued belongs to the previous target.
@@ -490,8 +535,9 @@ void EngineGL33::VRBeginHUDPass(Camera& camera)
     camera.SetPerspective(s_near, s_far, s_hudTanX, s_hudTanY);
     camera.Adjust(this);
 
-    // The game aims along the view (read back by World next frame).
-    s_aimDir = (s_bodyYaw * head).Direction();
+    // The game aims along the barrel, or along the view without a tracked
+    // hand (read back by World next frame).
+    s_aimDir = s_weaponValid ? s_weaponWorld.Direction() : (s_bodyYaw * head).Direction();
     s_aimValid = true;
 }
 
@@ -500,6 +546,14 @@ bool EngineGL33::VRAimDirection(Vector3& dir) const
     if (!_vrActive || !s_aimValid)
         return false;
     dir = s_aimDir;
+    return true;
+}
+
+bool EngineGL33::VRWeaponPose(Matrix4& world) const
+{
+    if (!_vrActive || !s_weaponValid)
+        return false;
+    world = s_weaponWorld;
     return true;
 }
 

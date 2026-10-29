@@ -19,11 +19,14 @@ Sint16 ToStick(float v)
     return static_cast<Sint16>(v * SDL_JOYSTICK_AXIS_MAX);
 }
 
+// SDL joystick drivers report triggers over the full axis range (released =
+// -32768) and the gamepad layer maps that to 0..32767; a raw 0 would read as
+// a half-pressed trigger, held forever.
 Sint16 ToTrigger(float v)
 {
     if (v < 0.0f)
         v = 0.0f;
-    return ToStick(v);
+    return ToStick(v * 2.0f - 1.0f);
 }
 
 void PushKey(SDL_Scancode sc, bool down)

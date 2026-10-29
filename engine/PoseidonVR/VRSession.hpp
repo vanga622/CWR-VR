@@ -31,6 +31,12 @@ struct VRConfig
     float snapAngle = 30.0f;     // degrees per snap
     float smoothSpeed = 120.0f;  // degrees per second at full stick
     float headLocomotion = 1.0f; // 1 = left stick moves where you look, 0 = where the body faces
+    // Weapon placement: where the weapon model's centre sits relative to the
+    // right hand, in the controller's aim frame (metres).
+    float weaponForward = 0.15f;
+    float weaponUp = 0.06f;
+    float weaponRight = 0.0f;
+    float twoHanded = 1.0f;      // 1 = left grip near the weapon steadies it with both hands
 };
 
 // Controller state from the OpenXR actions (Touch layout), refreshed every
@@ -63,9 +69,19 @@ struct EyeView
     float tanLeft = -1, tanRight = 1, tanUp = 1, tanDown = -1; // FOV edges as tangents
 };
 
+// A tracked controller pose in the same LOCAL space as the eyes.
+struct HandPose
+{
+    bool valid = false;
+    float orientation[4] = {0, 0, 0, 1};
+    float position[3] = {0, 0, 0};
+};
+
 struct StereoFrame
 {
     EyeView eyes[2];
+    HandPose grip[2]; // [0] left, [1] right: where the hand holds the controller
+    HandPose aim[2];  // pointing ray (-Z forward)
     int eyeWidth = 0;
     int eyeHeight = 0;
     unsigned int eyeTexture[2] = {0, 0}; // 0 in fake mode: nothing to submit
