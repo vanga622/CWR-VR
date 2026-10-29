@@ -357,6 +357,8 @@ void AppConfig::ParseCommandLine(int argc, char** argv)
         displayGroup->add_flag("--splash,!--no-splash", showSplash, "Show splash screens on startup");
         bool showMenuScene = true;
         displayGroup->add_flag("--menu-scene,!--no-menu-scene", showMenuScene, "Show 3D background scene in menu");
+        // VR: OpenXR session, log written to vr.log next to the executable
+        displayGroup->add_flag("--vr", _vrEnabled, "Show the game in a VR headset through OpenXR");
 
         showOption(
             displayGroup->add_option("--render", _renderBackend, "Graphics backend: dummy, gl33, auto (default: gl33)")

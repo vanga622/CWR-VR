@@ -580,6 +580,14 @@ class EngineGL33 : public Engine
     void BackToFront();
     void CaptureScreenshotIfPending();
 
+    // VR: OpenXR virtual screen (EngineGL33_VR.cpp).  Inactive unless --vr.
+    void InitVR();
+    void ShutdownVR();
+    // Copy the finished window frame into the headset's quad swapchain.
+    void SubmitVRFlatFrame();
+    bool _vrActive = false;
+    unsigned int _vrBlitFbo = 0;
+
   public:
     EngineGL33(int width, int height, bool windowed, int bpp);
     ~EngineGL33() override;

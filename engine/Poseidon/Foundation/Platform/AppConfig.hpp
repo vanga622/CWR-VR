@@ -61,6 +61,9 @@ public:
     
     bool NoSplash() const { return _noSplash; }
 
+    // VR: --vr starts an OpenXR session (CWR-VR); off = unchanged flat game
+    bool IsVREnabled() const { return _vrEnabled; }
+
     /// Check if the ASCII-art dedicated-server startup banner should be skipped
     bool NoBanner() const { return _noBanner; }
     
@@ -359,6 +362,7 @@ private:
     bool _widthExplicit = false;
     bool _heightExplicit = false;
     bool _noSplash = false;
+    bool _vrEnabled = false; // VR: --vr
     bool _noBanner = false;
     bool _noMenuScene = false;
     std::string _renderBackend = "gl33";

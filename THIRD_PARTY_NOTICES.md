@@ -117,7 +117,8 @@ MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
 
 ## 1.4 Apache License 2.0
 
-Applies to the Khronos-derived API definitions in glad (see [§1.1](#11-glad--opengl-loader)).
+Applies to the Khronos-derived API definitions in glad (see [§1.1](#11-glad--opengl-loader)),
+and to the OpenXR SDK loader resolved via vcpkg (see [§2](#2-dependencies-resolved-via-vcpkg)).
 
 ```
                                  Apache License
@@ -349,6 +350,8 @@ noted where pinned by an `overrides` entry in the manifest.
 | spdlog *(1.15.1)* | MIT (bundles fmt, MIT) | © 2016 Gabi Melman | <https://github.com/gabime/spdlog> |
 | FreeType | FTL **OR** GPL-2.0 (dual) | © 1996–2024 David Turner, Robert Wilhelm, Werner Lemberg & the FreeType Project | <https://freetype.org> |
 | zstd | BSD-3-Clause | © Meta Platforms, Inc. and affiliates | <https://github.com/facebook/zstd> |
+| OpenXR SDK loader *(Windows; CWR-VR)* | Apache-2.0 (license text in [§1.4](#14-apache-license-20)) | © 2017–2025 The Khronos Group Inc. | <https://github.com/KhronosGroup/OpenXR-SDK> |
+| JsonCpp *(OpenXR loader dependency)* | MIT | © 2007–2010 Baptiste Lepilleur and The JsonCpp Authors | <https://github.com/open-source-parsers/jsoncpp> |
 
 ## 2.1 MIT License
 

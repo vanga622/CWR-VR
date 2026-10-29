@@ -16,6 +16,7 @@ add_library(PoseidonGL33 STATIC
 )
 
 target_link_libraries(PoseidonGL33 PUBLIC Poseidon)
+target_link_libraries(PoseidonGL33 PRIVATE PoseidonVR) # VR: OpenXR virtual screen
 
 target_compile_definitions(PoseidonGL33 PRIVATE
     $<$<CONFIG:Debug>:_DEBUG>

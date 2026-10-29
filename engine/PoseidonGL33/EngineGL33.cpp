@@ -454,6 +454,9 @@ EngineGL33::EngineGL33(int width, int height, bool windowed, int bpp)
     // something during startup.
     LoadConfig();
     InitGL();
+
+    // VR: needs the GL context current; no-op without --vr.
+    InitVR();
 }
 
 EngineGL33::ShutdownGuard::~ShutdownGuard()
@@ -476,6 +479,9 @@ EngineGL33::~EngineGL33()
     SaveConfig();
 
     DebugOverlay::Shutdown();
+
+    // VR: release the OpenXR session while its GL context still exists.
+    ShutdownVR();
 
     ShutdownGL();
 

@@ -639,6 +639,10 @@ bool EngineGL33::SetSwapInterval(int interval)
     // SDL3 SDL_GL_SetSwapInterval handles all three modes natively:
     // 0 = off, 1 = on, -1 = adaptive (where supported; falls back to 1
     // automatically when adaptive isn't available on the current driver).
+    // VR: xrWaitFrame paces frames to the headset; monitor vsync on top of it
+    // would halve the rate whenever the two refresh rates disagree.
+    if (_vrActive)
+        interval = 0;
     return SDL_GL_SetSwapInterval(interval);
 }
 

@@ -599,6 +599,9 @@ void EngineGL33::BackToFront()
     // undefined, so the capture has to happen pre-swap.
     CaptureScreenshotIfPending();
 
+    // VR: same final pixels onto the headset's virtual screen, pre-swap.
+    SubmitVRFlatFrame();
+
     if (_glContext && _sdlWindow)
         SDL_GL_SwapWindow(_sdlWindow);
 

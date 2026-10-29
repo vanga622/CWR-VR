@@ -192,6 +192,7 @@ endif()
 set(DIST_DIR "${CMAKE_SOURCE_DIR}/dist/${DIST_PRESET_NAME}")
 
 add_subdirectory(engine/Poseidon)
+add_subdirectory(engine/PoseidonVR) # VR: OpenXR (CWR-VR)
 add_subdirectory(engine/PoseidonGL33)
 add_subdirectory(engine/PoseidonOpenAL)
 add_subdirectory(engine/PoseidonFormats)
