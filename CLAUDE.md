@@ -48,8 +48,8 @@ Put new VR code in `engine/PoseidonVR/` as its own library, and keep edits to ex
 
 - [x] M0 Build and run the unmodified game
 - [x] M1 OpenXR session, flat game on a virtual screen, log runtime extensions (check `XR_KHR_opengl_enable` on VDXR; fallback SteamVR or `WGL_NV_DX_interop2` into a D3D11 swapchain)
-- [ ] M2 Stereo rendering, head tracking, asymmetric FOV, both-eye culling, HUD on a quad layer  ← current
-- [ ] M3 OpenXR actions mapped to `UserAction`s, turning, recentre
+- [x] M2 Stereo rendering, head tracking, asymmetric FOV, both-eye culling, HUD on a quad layer (culling is still per eye; a shared cull is a later optimisation)
+- [ ] M3 OpenXR actions mapped to `UserAction`s, turning, recentre  ← current
 - [ ] M4 Weapon at the controller pose, fire from the barrel, two-handed grip
 - [ ] M5 Arm IK, eye height follows stance (stand/crouch/prone)
 - [ ] M6 Manual reload: eject, grab magazine from pouch, insert, charge
