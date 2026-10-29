@@ -79,6 +79,9 @@ bool s_initialized = false;
 bool s_visible = false;
 bool s_selectShadowsTab = false; // one-shot: force-select the Shadows tab next draw
 bool s_selectMemoryTab = false;  // one-shot: force-select the Memory tab next draw
+// VR: backend-provided extra tab (SetExtraTab).
+const char* s_extraTabName = nullptr;
+void (*s_extraTabDraw)() = nullptr;
 SDL_Window* s_window = nullptr;
 // Saved mouse-grab state while the dev panel holds the cursor released.
 bool s_mouseReleasedByPanel = false;
@@ -1675,6 +1678,12 @@ void DrawMainWindow()
             DrawShadowsTab();
             ImGui::EndTabItem();
         }
+        // VR: backend-provided tab (see SetExtraTab).
+        if (s_extraTabDraw && ImGui::BeginTabItem(s_extraTabName))
+        {
+            s_extraTabDraw();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
 
@@ -1811,6 +1820,11 @@ void SelectShadowsTab()
 void SelectMemoryTab()
 {
     s_selectMemoryTab = true;
+}
+void SetExtraTab(const char* name, void (*draw)())
+{
+    s_extraTabName = name;
+    s_extraTabDraw = name ? draw : nullptr;
 }
 
 void RequestDeferredReload(const char* modPath)

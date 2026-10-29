@@ -74,6 +74,13 @@ public:
     bool IsActive() const;
     bool IsFake() const;
     const VRConfig& Config() const;
+    // Live tunables: the dev panel's sliders edit these directly.
+    VRConfig& MutableConfig();
+    // Re-reads vr.ini when the file changed on disk (checked at most once a
+    // second).  Returns true when new values were loaded.  eye_scale takes
+    // effect on the next start (swapchains are sized once).
+    bool ReloadConfigIfChanged();
+    void SaveConfig();
 
     // Flat frame, once per presented frame before SwapWindow: polls runtime
     // events and, while the session runs, waits for/begins an XR frame.

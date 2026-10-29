@@ -1,8 +1,10 @@
 #include <PoseidonVR/VRSession.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -114,13 +116,22 @@ const ConfigKey kConfigKeys[] = {
     {"screen", "width", &VRConfig::screenWidth, "flat virtual screen width, metres (16:9)"},
 };
 
-void WriteDefaultConfig(const std::string& path)
+std::filesystem::file_time_type s_configTime;
+std::chrono::steady_clock::time_point s_configChecked;
+
+std::filesystem::file_time_type ConfigFileTime(const std::string& path)
+{
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(path, ec);
+    return ec ? std::filesystem::file_time_type{} : t;
+}
+
+void WriteConfig(const std::string& path, const VRConfig& values)
 {
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f)
         return;
-    std::fprintf(f, "; CWR-VR tunables. Delete this file to get the defaults back.\n");
-    const VRConfig defaults;
+    std::fprintf(f, "; CWR-VR tunables, re-read while the game runs. Delete this file to get the defaults back.\n");
     const char* section = "";
     for (const auto& k : kConfigKeys)
     {
@@ -129,9 +140,10 @@ void WriteDefaultConfig(const std::string& path)
             section = k.section;
             std::fprintf(f, "\n[%s]\n", section);
         }
-        std::fprintf(f, "; %s\n%s=%g\n", k.comment, k.key, defaults.*k.field);
+        std::fprintf(f, "; %s\n%s=%g\n", k.comment, k.key, values.*k.field);
     }
     std::fclose(f);
+    s_configTime = ConfigFileTime(path);
 }
 
 void LoadConfig()
@@ -141,10 +153,11 @@ void LoadConfig()
     FILE* f = std::fopen(path.c_str(), "r");
     if (!f)
     {
-        WriteDefaultConfig(path);
+        WriteConfig(path, s_config);
         Log("vr.ini: not found, wrote defaults to %s", path.c_str());
         return;
     }
+    s_configTime = ConfigFileTime(path);
 
     std::string section;
     char line[256];
@@ -694,6 +707,37 @@ bool VRSession::IsFake() const
 const VRConfig& VRSession::Config() const
 {
     return s_config;
+}
+
+VRConfig& VRSession::MutableConfig()
+{
+    return s_config;
+}
+
+bool VRSession::ReloadConfigIfChanged()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (now - s_configChecked < std::chrono::seconds(1))
+        return false;
+    s_configChecked = now;
+
+    const std::string path = ExeDirFile("vr.ini");
+    const auto t = ConfigFileTime(path);
+    if (t == s_configTime || t == std::filesystem::file_time_type{})
+        return false;
+
+    const float eyeScale = s_config.eyeScale;
+    LoadConfig();
+    if (s_config.eyeScale != eyeScale)
+        Log("vr.ini: eye_scale changes take effect on the next start");
+    return true;
+}
+
+void VRSession::SaveConfig()
+{
+    const std::string path = ExeDirFile("vr.ini");
+    WriteConfig(path, s_config);
+    Log("vr.ini: saved from the dev panel");
 }
 
 #if defined(_WIN32)

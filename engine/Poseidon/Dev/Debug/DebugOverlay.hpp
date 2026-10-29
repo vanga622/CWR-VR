@@ -46,6 +46,10 @@ namespace DebugOverlay
     // Same, for the "Memory" tab (process heap + per-subsystem residency).
     void SelectMemoryTab();
 
+    // VR: one extra tab drawn by a backend library (the CWR-VR "VR" tab), so
+    // the core panel needs no dependency on it.  nullptr removes it.
+    void SetExtraTab(const char* name, void (*draw)());
+
     // Returns true if the focused ImGui widget wants to swallow keyboard /
     // mouse events.  Callers should drop the SDL event before passing it to
     // the engine when these return true — otherwise typing into a slider

@@ -14,6 +14,7 @@
 // virtual screen instead (M1).
 
 #include <PoseidonGL33/EngineGL33.hpp>
+#include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Foundation/Platform/AppConfig.hpp>
 #include <Poseidon/Graphics/Core/GLClear.hpp>
 #include <Poseidon/Graphics/Core/GLPipelineState.hpp>
@@ -22,6 +23,12 @@
 
 #include <SDL3/SDL.h>
 #include <glad/gl.h>
+// The engine's DebugLog macro collides with ImGui::DebugLog; this TU does not
+// use the macro (same as DebugOverlay.cpp).
+#ifdef DebugLog
+#undef DebugLog
+#endif
+#include <imgui.h>
 
 namespace
 {
@@ -181,6 +188,38 @@ void FitRect(int srcW, int srcH, int dstX, int dstY, int dstW, int dstH, int rec
     rect[3] = rect[1] + h;
 }
 
+// Dev panel "VR" tab (--dev, Ctrl+`).  In a stereo frame the panel is drawn
+// onto the HUD layer, so it can be used from inside the headset.
+void DrawVRTab()
+{
+    auto& vr = PoseidonVR::VRSession::Instance();
+    PoseidonVR::VRConfig& c = vr.MutableConfig();
+
+    ImGui::Text("%s", vr.IsFake() ? "Fake headset (--vr-fake)" : "OpenXR session");
+    if (s_eyes[0].fbo)
+        ImGui::Text("Eye targets: %dx%d, %dx MSAA", s_eyes[0].width, s_eyes[0].height, s_eyes[0].samples);
+
+    ImGui::SeparatorText("HUD");
+    ImGui::SliderFloat("Half width (tan)", &c.hudHalfWidthTan, 0.3f, 1.2f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Angular size of the HUD/menus. Smaller = text nearer the centre of view.");
+    ImGui::SliderFloat("Distance (m)", &c.hudDistance, 0.5f, 5.0f, "%.2f");
+
+    ImGui::SeparatorText("Flat screen (loading, menus without 3D)");
+    ImGui::SliderFloat("Screen distance (m)", &c.screenDistance, 1.0f, 10.0f, "%.2f");
+    ImGui::SliderFloat("Screen width (m)", &c.screenWidth, 1.0f, 10.0f, "%.2f");
+
+    ImGui::SeparatorText("Render");
+    ImGui::SliderFloat("Eye scale", &c.eyeScale, 0.3f, 1.5f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Per-eye resolution vs the headset's recommendation. Applies after a restart.");
+
+    ImGui::Spacing();
+    if (ImGui::Button("Save to vr.ini"))
+        vr.SaveConfig();
+    ImGui::TextDisabled("vr.ini is also re-read when edited on disk.");
+}
+
 } // namespace
 
 void EngineGL33::InitVR()
@@ -197,6 +236,7 @@ void EngineGL33::InitVR()
         return;
     }
     s_mirror = cfg.IsVRMirror();
+    Poseidon::Dev::DebugOverlay::SetExtraTab("VR", DrawVRTab);
     // xrWaitFrame paces the loop from now on (see SetSwapInterval).
     if (!vr.IsFake())
         SDL_GL_SetSwapInterval(0);
@@ -205,6 +245,8 @@ void EngineGL33::InitVR()
 
 void EngineGL33::ShutdownVR()
 {
+    if (_vrActive)
+        Poseidon::Dev::DebugOverlay::SetExtraTab(nullptr, nullptr);
     for (EyeTarget& t : s_eyes)
         DestroyEyeTarget(t);
     if (_vrBlitFbo)
@@ -314,6 +356,7 @@ void EngineGL33::SubmitVRFrame()
 {
     if (!_vrActive)
         return;
+    PoseidonVR::VRSession::Instance().ReloadConfigIfChanged();
     if (_vrStereoFrame)
         SubmitVRStereoFrame();
     else if (!_vrFrameAttempted)
