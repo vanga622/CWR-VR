@@ -745,6 +745,10 @@ bool EntityAI::AutoReload(int weapon)
     //   AddMagazine ????
     //   AddWeapon ????
 
+    // VR: the player reloads by hand (manual reload).
+    if (GEngine->VRManualReload() && static_cast<EntityAI*>(GWorld->PlayerOn()) == this)
+        return false;
+
     const MagazineSlot& slot = GetMagazineSlot(weapon);
     const MuzzleType* muzzle = slot._muzzle;
     if (muzzle->_autoReload || !GWorld->PlayerOn() || !GWorld->PlayerOn()->Brain() ||

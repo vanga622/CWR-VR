@@ -86,7 +86,7 @@ void VRGamepad::Destroy()
     _escapeDown = _menuWasDown = false;
 }
 
-void VRGamepad::Update(const ControllerState& c, float moveYaw)
+void VRGamepad::Update(const ControllerState& c, float moveYaw, bool forwardB)
 {
     if (!_joystick)
         return;
@@ -102,12 +102,12 @@ void VRGamepad::Update(const ControllerState& c, float moveYaw)
     SDL_SetJoystickVirtualAxis(_joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, ToTrigger(c.trigger[1]));
 
     SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_SOUTH, c.a);
-    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_EAST, c.b);
+    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_EAST, forwardB && c.b);
     SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_WEST, c.x);
     SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_NORTH, c.y);
     SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_LEFT_STICK, c.thumbClick[0]);
-    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_DPAD_UP, c.grip[0] > 0.6f);
-    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_DPAD_DOWN, c.grip[1] > 0.6f);
+    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_DPAD_UP, c.turnY > 0.7f);
+    SDL_SetJoystickVirtualButton(_joystick, SDL_GAMEPAD_BUTTON_DPAD_DOWN, c.turnY < -0.7f);
 
     // Menu: Escape, held for one frame so the engine's edge detection sees
     // a press and a release.

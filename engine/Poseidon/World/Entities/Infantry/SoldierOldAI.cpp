@@ -801,6 +801,13 @@ bool Soldier::FireWeapon(int weapon, TargetType* target)
         PlayEmptyMagazineSound(weapon);
         return false;
     }
+    // VR: after a magazine went in empty, nothing fires until the charging
+    // handle is pulled (manual reload).
+    if (!_vrChambered && GEngine->VRManualReload() && static_cast<EntityAI*>(GWorld->PlayerOn()) == this)
+    {
+        PlayEmptyMagazineSound(weapon);
+        return false;
+    }
     const MagazineType* aInfo = magazine ? magazine->_type : nullptr;
     PoseidonAssert(aInfo);
     const WeaponModeType* mode = GetWeaponMode(weapon);
@@ -949,6 +956,9 @@ bool Soldier::FireWeapon(int weapon, TargetType* target)
     if (fired)
     {
         base::FireWeapon(weapon, target);
+        // VR: fired dry - the bolt locks back, the next magazine needs a charge.
+        if (magazine->_ammo <= 0)
+            _vrChambered = false;
         return true;
     }
     return false;

@@ -53,6 +53,21 @@ struct VRConfig
     // (beyond it, head and hands are pulled back over the body so the arms
     // never stretch and the view never enters the shoulders), metres.
     float leanFree = 0.05f;
+    // Manual reload (M6).  Places are in metres: the pouch relative to the
+    // head (body heading), the magazine well and charging handle relative to
+    // the weapon centre (along its barrel/up axes).
+    float manualReload = 1.0f;   // 1 = B ejects, magazine from pouch by hand, charge by hand
+    float pouchForward = 0.20f;
+    float pouchDown = 0.50f;
+    float pouchRight = -0.05f;
+    float pouchRadius = 0.20f;
+    float wellForward = 0.05f;   // magazine well: ahead of the weapon centre
+    float wellDown = 0.10f;      // and below it
+    float wellRadius = 0.12f;
+    float chargeBack = 0.20f;    // charging handle: behind the weapon centre
+    float chargeUp = 0.05f;
+    float chargeRadius = 0.12f;
+    float chargePull = 0.06f;    // pull back this far to charge
 };
 
 // Controller state from the OpenXR actions (Touch layout), refreshed every
@@ -136,6 +151,8 @@ public:
     // Latest hand poses, located with each Begin*Frame (flat frames too).
     const HandPose& Aim(int hand) const;
     const HandPose& Grip(int hand) const;
+    // Short vibration on a controller (0 left, 1 right); amplitude 0..1.
+    void Haptic(int hand, float amplitude, float seconds);
 
     // One line in vr.log, for VR events decided outside this library
     // (recentre, heading re-sync).

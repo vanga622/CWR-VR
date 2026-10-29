@@ -10,10 +10,12 @@
 //   triggers   -> triggers (right = fire, left = optics by default)
 //   A B X Y    -> A B X Y
 //   left stick click -> left stick click
-//   grips      -> d-pad up / down (previous / next action)
+//   right stick up / down -> d-pad up / down (previous / next action)
 //   menu       -> Escape (pause menu)
-// The right stick is not forwarded: it turns the player and its click
-// recentres (handled by the graphics backend).
+// Right stick left/right turns the player and its click recentres (handled
+// by the graphics backend); the grips belong to the hands (two-handed hold,
+// reloading) and are not forwarded.  B goes out only when the caller says so
+// (in gameplay it ejects the magazine).
 
 struct SDL_Joystick;
 
@@ -31,7 +33,7 @@ public:
 
     // moveYaw: radians the view heading is right of the body heading; the
     // left stick is rotated by it so "forward" means "where I look".
-    void Update(const ControllerState& c, float moveYaw);
+    void Update(const ControllerState& c, float moveYaw, bool forwardB);
 
 private:
     SDL_Joystick* _joystick = nullptr;

@@ -133,6 +133,18 @@ const ConfigKey kConfigKeys[] = {
     {"stance", "eye_height", &VRConfig::eyeHeight, "metres added to the soldier's eye height (+ if you feel too short)"},
     {"stance", "lean_free", &VRConfig::leanFree,
      "sideways/forward head move kept, metres; beyond it the body stays under the head"},
+    {"reload", "manual", &VRConfig::manualReload, "1 = B ejects, grab a magazine from the pouch, insert, charge"},
+    {"reload", "pouch_forward", &VRConfig::pouchForward, "pouch ahead of the head, metres"},
+    {"reload", "pouch_down", &VRConfig::pouchDown, "pouch below the head, metres"},
+    {"reload", "pouch_right", &VRConfig::pouchRight, "pouch right of the head, metres (- = left)"},
+    {"reload", "pouch_radius", &VRConfig::pouchRadius, "how close the left hand must be to grab, metres"},
+    {"reload", "well_forward", &VRConfig::wellForward, "magazine well ahead of the weapon centre, metres"},
+    {"reload", "well_down", &VRConfig::wellDown, "magazine well below the weapon centre, metres"},
+    {"reload", "well_radius", &VRConfig::wellRadius, "how close the magazine must come to insert, metres"},
+    {"reload", "charge_back", &VRConfig::chargeBack, "charging handle behind the weapon centre, metres"},
+    {"reload", "charge_up", &VRConfig::chargeUp, "charging handle above the weapon centre, metres"},
+    {"reload", "charge_radius", &VRConfig::chargeRadius, "how close the left hand must be to grab it, metres"},
+    {"reload", "charge_pull", &VRConfig::chargePull, "pull back this far to charge, metres"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -277,6 +289,39 @@ void FillFakeFrame(StereoFrame& out)
     // Left grip held, so the two-handed path is what the screenshots show.
     s_controllers = ControllerState{};
     s_controllers.grip[0] = 1.0f;
+
+    // CWR_VR_FAKE_SCRIPT=reload: eject (B), left hand to the chest pouch and
+    // grab, to the magazine well under the weapon, let go.
+    static const char* script = std::getenv("CWR_VR_FAKE_SCRIPT");
+    if (script && std::strcmp(script, "reload") == 0)
+    {
+        const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count();
+        struct Key
+        {
+            float time, x, y, z, grip;
+            bool b;
+        };
+        static const Key kKeys[] = {
+            {0.0f, -0.02f, -0.30f, -0.62f, 0.0f, false}, // hand on the fore-end, relaxed
+            {2.0f, -0.02f, -0.30f, -0.62f, 0.0f, true},  // B: eject
+            {2.5f, -0.05f, -0.50f, -0.20f, 0.0f, false}, // hand at the pouch
+            {3.5f, -0.05f, -0.50f, -0.20f, 1.0f, false}, // grab
+            {4.5f, 0.06f, -0.36f, -0.50f, 1.0f, false},  // at the well: inserts
+            {5.5f, -0.02f, -0.30f, -0.62f, 0.0f, false}, // back, let go
+        };
+        const Key* k = &kKeys[0];
+        for (const Key& key : kKeys)
+            if (t >= key.time)
+                k = &key;
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+        {
+            p->position[0] = k->x;
+            p->position[1] = k->y + headY;
+            p->position[2] = k->z;
+        }
+        s_controllers.grip[0] = k->grip;
+        s_controllers.b = k->b;
+    }
     for (int i = 0; i < 2; ++i)
     {
         s_aim[i] = out.aim[i];
@@ -334,6 +379,7 @@ struct State
     XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE, btnY = XR_NULL_HANDLE;
     XrAction menu = XR_NULL_HANDLE;
     XrAction gripPose = XR_NULL_HANDLE, aimPose = XR_NULL_HANDLE;
+    XrAction haptic = XR_NULL_HANDLE;
     XrSpace gripSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrSpace aimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool frameBegun = false;
@@ -655,7 +701,8 @@ bool CreateActions()
         !CreateAction(s.btnY, "button_y", "Y", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
         !CreateAction(s.menu, "menu", "Menu", XR_ACTION_TYPE_BOOLEAN_INPUT, false) ||
         !CreateAction(s.gripPose, "grip_pose", "Hand grip pose", XR_ACTION_TYPE_POSE_INPUT, true) ||
-        !CreateAction(s.aimPose, "aim_pose", "Hand aim pose", XR_ACTION_TYPE_POSE_INPUT, true))
+        !CreateAction(s.aimPose, "aim_pose", "Hand aim pose", XR_ACTION_TYPE_POSE_INPUT, true) ||
+        !CreateAction(s.haptic, "haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT, true))
         return false;
 
     const std::vector<Binding> common = {
@@ -673,6 +720,8 @@ bool CreateActions()
         {&s.gripPose, "/user/hand/right/input/grip/pose"},
         {&s.aimPose, "/user/hand/left/input/aim/pose"},
         {&s.aimPose, "/user/hand/right/input/aim/pose"},
+        {&s.haptic, "/user/hand/left/output/haptic"},
+        {&s.haptic, "/user/hand/right/output/haptic"},
     };
     std::vector<Binding> touch = common;
     touch.push_back({&s.btnX, "/user/hand/left/input/x/click"});
@@ -1038,6 +1087,24 @@ const HandPose& VRSession::Aim(int hand) const
 const HandPose& VRSession::Grip(int hand) const
 {
     return s_grip[hand];
+}
+
+void VRSession::Haptic(int hand, float amplitude, float seconds)
+{
+#if defined(_WIN32)
+    if (s_fake || s.haptic == XR_NULL_HANDLE || s.sessionState != XR_SESSION_STATE_FOCUSED)
+        return;
+    XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+    vib.amplitude = amplitude;
+    vib.duration = static_cast<XrDuration>(seconds * 1.0e9);
+    vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+    XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+    info.action = s.haptic;
+    info.subactionPath = s.hands[hand];
+    xrApplyHapticFeedback(s.session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+#else
+    (void)hand, (void)amplitude, (void)seconds;
+#endif
 }
 
 void VRSession::LogLine(const char* text)

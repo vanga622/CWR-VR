@@ -197,8 +197,13 @@ void Soldier::KeyboardPilot(float deltaT, SimulationImportance prec)
     ManAction selAction = ManActStop;
     bool forceAction = false;
 
+    // VR: manual reload by hand.
+    VRReloadStep();
+
     if (input.GetActionToDo(UAReloadMagazine))
     {
+        // VR: the quick reload button leaves the weapon ready to fire.
+        _vrChambered = true;
         if (DisableWeaponsLong())
         {
             if (_currentWeapon < 0)

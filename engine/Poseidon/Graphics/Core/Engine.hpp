@@ -404,6 +404,20 @@ class Engine : public IGraphicsEngine
     // and its body orientation; called by World before drawing, not called
     // when the camera is elsewhere (cutscene, free camera).
     virtual void VRSetPlayerBody(const void* /*id*/, const Matrix3& /*orientation*/) {}
+
+    // VR (M6): manual reload.  The soldier reports his weapon each frame
+    // (magazine in, spare magazines, round chambered); the backend turns
+    // hand gestures into events the soldier takes once each.
+    enum VRReloadEvent
+    {
+        VRReloadNone,
+        VRReloadEject,  // B: drop the magazine out
+        VRReloadInsert, // magazine from the pouch pushed into the well
+        VRReloadCharge, // charging handle pulled back
+    };
+    virtual bool VRManualReload() const { return false; }
+    virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/) {}
+    virtual int VRTakeReloadEvent() { return VRReloadNone; }
     // VR: the left hand is on the weapon (two-handed hold) this frame.
     virtual bool VRWeaponTwoHanded() const { return false; }
     void Pause() override = 0;   // stop and prepare everything for GDI

@@ -205,6 +205,20 @@ float s_horizontalShift[2] = {0.0f, 0.0f}; // x, z: keeps the body under the hea
 
 // Menu pointer (M5): right controller ray -> UI cursor, trigger -> click.
 bool s_pointerDown = false;
+bool s_uiInput = true; // UI (pointer) rather than gameplay this frame
+
+// Manual reload (M6): the soldier's weapon state (VRSetMagazineState) and
+// the gesture in progress.
+bool s_magStateValid = false;
+bool s_magLoaded = true;
+int s_magSpares = 0;
+bool s_chambered = true;
+bool s_magInHand = false;   // left hand holds a magazine from the pouch
+bool s_charging = false;    // left hand holds the charging handle
+float s_chargeStart = 0.0f; // where along the barrel it was grabbed
+bool s_ejectHeld = false;
+bool s_leftGripHeld = false;
+int s_reloadEvent = Engine::VRReloadNone;
 
 
 void DestroyEyeTarget(EyeTarget& t)
@@ -485,8 +499,9 @@ void UpdateWeaponPose()
     Matrix3 orient = s_bodyYaw * ToEngineOrientation(aim.orientation);
     const Vector3 hand = TrackedToWorld(grip.position);
 
+    // Not while the left hand is busy reloading.
     const PoseidonVR::HandPose& support = s_frame.grip[0];
-    if (cfg.twoHanded >= 0.5f && vr.Controllers().grip[0] > 0.5f && support.valid)
+    if (cfg.twoHanded >= 0.5f && vr.Controllers().grip[0] > 0.5f && support.valid && !s_magInHand && !s_charging)
     {
         Vector3 dir = TrackedToWorld(support.position) - hand;
         const float len = dir.Size();
@@ -501,6 +516,105 @@ void UpdateWeaponPose()
     s_weaponWorld.SetPosition(hand + orient.Direction() * cfg.weaponForward + orient.DirectionUp() * cfg.weaponUp +
                               orient.DirectionAside() * cfg.weaponRight);
     s_weaponValid = true;
+}
+
+// Manual reload (M6), as gestures with the left hand:
+//   B (right)            eject the magazine
+//   grip at the pouch    take a magazine (only with the weapon empty and a
+//                        spare left); releasing it elsewhere puts it back
+//   bring it to the well insert it
+//   grip at the handle   and pull back along the barrel: chamber a round
+//                        (needed when the weapon was fired empty)
+// Each step vibrates the hand doing it.  The game side (magazines, firing)
+// is in Man, which takes the events through VRTakeReloadEvent.
+void UpdateReload(const float headXr[3])
+{
+    auto& vr = PoseidonVR::VRSession::Instance();
+    const PoseidonVR::VRConfig& cfg = vr.Config();
+    const PoseidonVR::ControllerState& c = vr.Controllers();
+
+    const bool ejectPress = c.b && !s_ejectHeld;
+    s_ejectHeld = c.b;
+    const bool gripNow = s_leftGripHeld ? c.grip[0] > 0.4f : c.grip[0] > 0.6f;
+    const bool gripPress = gripNow && !s_leftGripHeld;
+    s_leftGripHeld = gripNow;
+
+    const PoseidonVR::HandPose& leftGrip = s_frame.grip[0];
+    if (cfg.manualReload < 0.5f || !s_weaponValid || !s_magStateValid || s_uiInput || !leftGrip.valid)
+    {
+        s_magInHand = s_charging = false;
+        return;
+    }
+    const Vector3 left = TrackedToWorld(leftGrip.position);
+    const Matrix4& weapon = s_weaponWorld;
+
+    if (ejectPress && s_magLoaded)
+    {
+        s_reloadEvent = Engine::VRReloadEject;
+        vr.Haptic(1, 0.5f, 0.05f);
+    }
+
+    // Pouch: on the chest, placed from the head along the body's heading.
+    const Matrix3 body = s_bodyId ? YawMatrix(s_bodyHeading) : s_bodyYaw;
+    const Vector3 pouch = TrackedToWorld(headXr) + body.Direction() * cfg.pouchForward - VUp * cfg.pouchDown +
+                          body.DirectionAside() * cfg.pouchRight;
+    if (!s_magInHand && gripPress && !s_magLoaded && s_magSpares > 0 && (left - pouch).Size() < cfg.pouchRadius)
+    {
+        s_magInHand = true;
+        vr.Haptic(0, 0.6f, 0.06f);
+    }
+
+    if (s_magInHand)
+    {
+        const Vector3 well =
+            weapon.Position() + weapon.Direction() * cfg.wellForward - weapon.DirectionUp() * cfg.wellDown;
+        if ((left - well).Size() < cfg.wellRadius)
+        {
+            s_reloadEvent = Engine::VRReloadInsert;
+            s_magInHand = false;
+            vr.Haptic(0, 0.8f, 0.08f);
+            vr.Haptic(1, 0.5f, 0.06f);
+        }
+        else if (!gripNow)
+        {
+            s_magInHand = false; // let go away from the weapon: back to the pouch
+        }
+    }
+
+    if (s_magLoaded && !s_chambered && !s_magInHand)
+    {
+        const Vector3 handle =
+            weapon.Position() - weapon.Direction() * cfg.chargeBack + weapon.DirectionUp() * cfg.chargeUp;
+        const float along = (left - weapon.Position()) * weapon.Direction();
+        if (!s_charging && gripPress && (left - handle).Size() < cfg.chargeRadius)
+        {
+            s_charging = true;
+            s_chargeStart = along;
+            vr.Haptic(0, 0.3f, 0.03f);
+        }
+        if (s_charging)
+        {
+            if (!gripNow)
+            {
+                s_charging = false;
+            }
+            else if (s_chargeStart - along > cfg.chargePull)
+            {
+                s_reloadEvent = Engine::VRReloadCharge;
+                s_charging = false;
+                vr.Haptic(0, 0.9f, 0.08f);
+                vr.Haptic(1, 0.5f, 0.05f);
+            }
+        }
+    }
+    else
+    {
+        s_charging = false;
+    }
+
+    // Reported again by the soldier's next simulation step; until then
+    // (dead, other camera) no gestures.
+    s_magStateValid = false;
 }
 
 // Raw byte copies between framebuffers: no scissor, no sRGB encoding of an
@@ -588,6 +702,18 @@ void DrawVRTab()
     ImGui::SliderFloat("Muzzle shift up (cm)", &c.muzzleUp, -10.0f, 10.0f, "%.1f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Angles: hits move more the farther the target. Shift: same offset at every distance.");
+
+    ImGui::SeparatorText("Manual reload");
+    bool manual = c.manualReload >= 0.5f;
+    if (ImGui::Checkbox("Reload by hand (B ejects)", &manual))
+        c.manualReload = manual ? 1.0f : 0.0f;
+    ImGui::SliderFloat("Pouch below head (m)", &c.pouchDown, 0.2f, 0.9f, "%.2f");
+    ImGui::SliderFloat("Pouch ahead (m)", &c.pouchForward, 0.0f, 0.4f, "%.2f");
+    ImGui::SliderFloat("Pouch right (m, - left)", &c.pouchRight, -0.4f, 0.4f, "%.2f");
+    ImGui::SliderFloat("Charge pull (m)", &c.chargePull, 0.02f, 0.15f, "%.2f");
+    ImGui::TextDisabled("Weapon: %s, %d spare, %s%s%s", s_magLoaded ? "magazine in" : "EMPTY", s_magSpares,
+                        s_chambered ? "chambered" : "needs charge", s_magInHand ? ", magazine in hand" : "",
+                        s_charging ? ", pulling handle" : "");
 
     ImGui::SeparatorText("Physical stance");
     bool physical = c.physicalStance >= 0.5f;
@@ -710,9 +836,13 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         s_bodyYaw = YawMatrix(s_playerYaw);
         UpdateWeaponPose();
         const auto ctx = Poseidon::InputSubsystem::Instance().GetContext();
-        const bool uiInput = ctx == Poseidon::InputContext::Menu || ctx == Poseidon::InputContext::Map ||
-                             ctx == Poseidon::InputContext::Spectator || Poseidon::Dev::DebugOverlay::IsVisible();
-        UpdatePointer(s_frame.aim[1], HudSurface(), uiInput, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
+        s_uiInput = ctx == Poseidon::InputContext::Menu || ctx == Poseidon::InputContext::Map ||
+                    ctx == Poseidon::InputContext::Spectator || Poseidon::Dev::DebugOverlay::IsVisible();
+        UpdatePointer(s_frame.aim[1], HudSurface(), s_uiInput, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
+        const float headXr[3] = {(eyes[0].position[0] + eyes[1].position[0]) * 0.5f,
+                                 (eyes[0].position[1] + eyes[1].position[1]) * 0.5f,
+                                 (eyes[0].position[2] + eyes[1].position[2]) * 0.5f};
+        UpdateReload(headXr);
     }
 
     // Whatever is still queued belongs to the previous target.
@@ -807,6 +937,26 @@ bool EngineGL33::VRHeadDrop(float& metres) const
     return true;
 }
 
+bool EngineGL33::VRManualReload() const
+{
+    return _vrActive && s_weaponValid && PoseidonVR::VRSession::Instance().Config().manualReload >= 0.5f;
+}
+
+void EngineGL33::VRSetMagazineState(bool loaded, int spares, bool chambered)
+{
+    s_magStateValid = true;
+    s_magLoaded = loaded;
+    s_magSpares = spares;
+    s_chambered = chambered;
+}
+
+int EngineGL33::VRTakeReloadEvent()
+{
+    const int ev = s_reloadEvent;
+    s_reloadEvent = VRReloadNone;
+    return ev;
+}
+
 void EngineGL33::VRSetPlayerBody(const void* id, const Matrix3& orientation)
 {
     s_bodyId = id;
@@ -842,8 +992,10 @@ void EngineGL33::SubmitVRFrame()
         return;
     auto& vr = PoseidonVR::VRSession::Instance();
     vr.ReloadConfigIfChanged();
-    // Read by the engine's input pass at the start of the next frame.
-    s_gamepad.Update(vr.Controllers(), s_moveYaw);
+    // Read by the engine's input pass at the start of the next frame.  B is
+    // the eject button in gameplay with manual reload, the gamepad's B in UI.
+    const bool forwardB = s_uiInput || vr.Config().manualReload < 0.5f;
+    s_gamepad.Update(vr.Controllers(), s_moveYaw, forwardB);
     if (_vrStereoFrame)
         SubmitVRStereoFrame();
     else if (!_vrFrameAttempted)
@@ -936,6 +1088,7 @@ void EngineGL33::SubmitVRFlatFrame()
     // Flat frames are all UI (menus without a 3D scene, loading): point and
     // click on the virtual screen.  The window is 16:9 under VR, so it fills
     // the screen and screen coordinates are window coordinates.
+    s_uiInput = true;
     UpdatePointer(vr.Aim(1), ScreenSurface(), true, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
 
     RawBlitScope raw;

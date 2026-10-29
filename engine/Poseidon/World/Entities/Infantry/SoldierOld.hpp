@@ -959,6 +959,12 @@ class Man: public Person
 	bool VRWeaponModelMatrix( Matrix4 &out, bool firing = false ) const;
 	// VR (M5): stance from the player's real head height; -1 = keep.
 	int VRWantedStanceAction( int actPos ) const;
+	// VR (M6): manual reload events from the controllers, and the weapon
+	// state reported back.  A weapon fired or ejected empty needs its
+	// charging handle pulled after the new magazine (_vrChambered).
+	void VRReloadStep();
+	bool _vrChambered = true;
+	const MagazineType *_vrLastMagType = nullptr;
 	// VR (M5): arm bones follow the weapon in the controller.
 	bool VRArmsTransform( Matrix4 &delta, bool &twoHanded ) const;
 	int VRArmBones( BlendAnimInfo *out, bool twoHanded ) const;

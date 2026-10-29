@@ -871,6 +871,64 @@ int Man::VRWantedStanceAction(int actPos) const
     return -1;
 }
 
+// VR (M6): see SoldierOld.hpp; the gestures are in EngineGL33_VR.cpp.
+void Man::VRReloadStep()
+{
+    if (_currentWeapon < 0 || !GEngine->VRManualReload())
+        return;
+    MagazineSlot& current = _magazineSlots[_currentWeapon];
+    const MuzzleType* muzzle = current._muzzle;
+    if (!muzzle)
+        return;
+
+    const int event = GEngine->VRTakeReloadEvent();
+    if (event != Engine::VRReloadNone)
+        LOG_INFO(Graphics, "VR: reload {} (magazine {}, ammo {})",
+                 event == Engine::VRReloadEject ? "eject" : event == Engine::VRReloadInsert ? "insert" : "charge",
+                 current._magazine ? "in" : "out", current._magazine ? static_cast<int>(current._magazine->_ammo) : 0);
+    switch (event)
+    {
+        case Engine::VRReloadEject:
+            if (Magazine* magazine = current._magazine)
+            {
+                _vrLastMagType = magazine->_type;
+                if (magazine->_ammo <= 0)
+                    _vrChambered = false;
+                for (int i = 0; i < _magazineSlots.Size(); i++)
+                    if (_magazineSlots[i]._muzzle == muzzle)
+                        _magazineSlots[i]._magazine = nullptr;
+                // A part-used magazine goes back to the pouch; an empty one is dropped.
+                if (magazine->_ammo <= 0)
+                    RemoveMagazine(magazine);
+            }
+            break;
+        case Engine::VRReloadInsert:
+        {
+            const int best = FindMagazineByType(muzzle, _vrLastMagType);
+            const bool loaded = best >= 0 && ReloadMagazineTimed(_currentWeapon, best, true);
+            if (loaded)
+                PlayReloadMagazineSound(_currentWeapon, muzzle);
+            LOG_INFO(Graphics, "VR: reload insert {} ({} rounds)", loaded ? "done" : "failed",
+                     loaded ? static_cast<int>(current._magazine->_ammo) : 0);
+            break;
+        }
+        case Engine::VRReloadCharge:
+            _vrChambered = true;
+            break;
+        default:
+            break;
+    }
+
+    int spares = 0;
+    for (int i = 0; i < NMagazines(); i++)
+    {
+        const Magazine* magazine = GetMagazine(i);
+        if (magazine && magazine != current._magazine && magazine->_ammo > 0 && muzzle->CanUse(magazine->_type))
+            ++spares;
+    }
+    GEngine->VRSetMagazineState(current._magazine != nullptr, spares, _vrChambered);
+}
+
 int Man::VRArmBones(BlendAnimInfo* out, bool twoHanded) const
 {
     static const struct
