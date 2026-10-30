@@ -30,6 +30,7 @@
 #include <PoseidonVR/VRSession.hpp>
 
 #include <SDL3/SDL.h>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <glad/gl.h>
@@ -178,9 +179,11 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const V
     }
     s_playerYaw = WrapAngle(s_playerYaw);
 
-    const bool bodyChanged = s_bodyId != s_lastBodyId;
+    // A frame without a reported body (menu, pause, a moment of free camera)
+    // is not a new body; only a different one is.
+    const bool bodyChanged = s_bodyId && s_lastBodyId && s_bodyId != s_lastBodyId;
     const float jump = (cameraPos - s_lastCameraPos).Size();
-    if (bodyChanged || jump > 10.0f) // 10 m in one frame: faster than any vehicle
+    if (bodyChanged || (s_bodyId && jump > 10.0f)) // 10 m in one frame: faster than any vehicle
     {
         const float diff = WrapAngle(gameYaw - (s_playerYaw + headYaw));
         s_playerYaw = WrapAngle(gameYaw - headYaw);
@@ -190,8 +193,11 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const V
         LOG_INFO(Graphics, "VR: {}", line);
         vr.LogLine(line);
     }
-    s_lastBodyId = s_bodyId;
-    s_lastCameraPos = cameraPos;
+    if (s_bodyId)
+    {
+        s_lastBodyId = s_bodyId;
+        s_lastCameraPos = cameraPos;
+    }
 
     // The game moves the soldier relative to its body; turn the stick so
     // "forward" is the chosen direction.  The left controller (default)
@@ -238,7 +244,17 @@ bool s_charging = false;    // left hand holds the charging handle
 float s_chargeStart = 0.0f; // where along the barrel it was grabbed
 bool s_ejectHeld = false;
 bool s_leftGripHeld = false;
+bool s_pouchSetHeld = false;
 int s_reloadEvent = Engine::VRReloadNone;
+// Short-lived confirmation on the HUD ("Magazine out", "Charged", ...).
+const char* s_flashText = nullptr;
+std::chrono::steady_clock::time_point s_flashUntil;
+
+void Flash(const char* text)
+{
+    s_flashText = text;
+    s_flashUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+}
 
 
 void DestroyEyeTarget(EyeTarget& t)
@@ -615,14 +631,35 @@ void UpdateReload(const float headXr[3])
         {
             s_reloadEvent = Engine::VRReloadEject;
             vr.Haptic(1, 0.5f, 0.05f);
+            Flash("Magazine out");
         }
         vr.LogLine(s_magLoaded ? "Reload: eject" : "Reload: B with no magazine in");
     }
 
     // Pouch: on the chest, placed from the head along the body's heading.
     const Matrix3 body = s_bodyId ? YawMatrix(s_bodyHeading) : s_bodyYaw;
-    const Vector3 pouch = TrackedToWorld(headXr) + body.Direction() * cfg.pouchForward - VUp * cfg.pouchDown +
-                          body.DirectionAside() * cfg.pouchRight;
+    const Vector3 head = TrackedToWorld(headXr);
+    const Vector3 pouch =
+        head + body.Direction() * cfg.pouchForward - VUp * cfg.pouchDown + body.DirectionAside() * cfg.pouchRight;
+
+    // Left grip held + left stick click: the pouch is where the hand is now.
+    const bool pouchSet = c.thumbClick[0] && !s_pouchSetHeld;
+    s_pouchSetHeld = c.thumbClick[0];
+    if (pouchSet && gripNow && !s_magInHand && !s_charging)
+    {
+        const Vector3 d = left - head;
+        PoseidonVR::VRConfig& edit = vr.MutableConfig();
+        edit.pouchForward = d * body.Direction();
+        edit.pouchRight = d * body.DirectionAside();
+        edit.pouchDown = -(d * VUp);
+        vr.SaveConfig();
+        vr.Haptic(0, 0.7f, 0.15f);
+        Flash("Pouch set here");
+        char line[128];
+        std::snprintf(line, sizeof(line), "Reload: pouch set at forward %.2f, right %.2f, down %.2f m",
+                      edit.pouchForward, edit.pouchRight, edit.pouchDown);
+        vr.LogLine(line);
+    }
     if (!s_magInHand && gripPress && !s_magLoaded)
     {
         const float dist = (left - pouch).Size();
@@ -631,6 +668,7 @@ void UpdateReload(const float headXr[3])
         {
             s_magInHand = true;
             vr.Haptic(0, 0.6f, 0.06f);
+            Flash("Magazine taken");
             std::snprintf(line, sizeof(line), "Reload: magazine taken from the pouch (%.2f m from it)", dist);
         }
         else
@@ -652,6 +690,7 @@ void UpdateReload(const float headXr[3])
             vr.Haptic(0, 0.8f, 0.08f);
             vr.Haptic(1, 0.5f, 0.06f);
             vr.LogLine("Reload: magazine inserted");
+            Flash("Magazine in");
         }
         else if (!gripNow)
         {
@@ -687,6 +726,7 @@ void UpdateReload(const float headXr[3])
                 vr.Haptic(0, 0.9f, 0.08f);
                 vr.Haptic(1, 0.5f, 0.05f);
                 vr.LogLine("Reload: charged");
+                Flash("Charged");
             }
         }
     }
@@ -738,6 +778,46 @@ void FitRect(int srcW, int srcH, int dstX, int dstY, int dstW, int dstH, int rec
     rect[1] = dstY + (dstH - h) / 2;
     rect[2] = rect[0] + w;
     rect[3] = rect[1] + h;
+}
+
+// Reload status at the bottom of the HUD, large, every gameplay frame: what
+// the weapon needs next, plus a short confirmation after each step.  The
+// game's own message line sits in a corner of the HUD, 30 degrees off
+// centre in the headset, where it is easily missed.
+void DrawVRStatus()
+{
+    const bool reloading = PoseidonVR::VRSession::Instance().Config().manualReload >= 0.5f && s_weaponValid &&
+                           !s_uiInput;
+    const char* hint = nullptr;
+    if (reloading)
+    {
+        if (s_magInHand)
+            hint = "Magazine in hand - push it in under the weapon";
+        else if (!s_magLoaded)
+            hint = s_magSpares > 0 ? "NO MAGAZINE - left grip at your chest" : "NO MAGAZINE - none left";
+        else if (!s_chambered)
+            hint = "Pull the charging handle back (left grip behind the sight)";
+    }
+    const bool flash = s_flashText && std::chrono::steady_clock::now() < s_flashUntil;
+    if (!hint && !flash)
+        return;
+
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    const float size = display.y * 0.035f;
+    ImDrawList* draw = ImGui::GetForegroundDrawList();
+    float y = display.y * 0.78f;
+    for (const char* text : {flash ? s_flashText : nullptr, hint})
+    {
+        if (!text)
+            continue;
+        const ImVec2 extent = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+        const ImVec2 pos((display.x - extent.x) * 0.5f, y);
+        draw->AddRectFilled(ImVec2(pos.x - 12, pos.y - 6), ImVec2(pos.x + extent.x + 12, pos.y + extent.y + 6),
+                            IM_COL32(0, 0, 0, 160), 6.0f);
+        draw->AddText(ImGui::GetFont(), size, pos, text == hint ? IM_COL32(255, 210, 80, 255) : IM_COL32_WHITE,
+                      text);
+        y += extent.y + 18;
+    }
 }
 
 // Dev panel "VR" tab (--dev, Ctrl+`).  In a stereo frame the panel is drawn
@@ -849,6 +929,7 @@ void EngineGL33::InitVR()
     }
     s_mirror = cfg.IsVRMirror();
     Poseidon::Dev::DebugOverlay::SetExtraTab("VR", DrawVRTab);
+    Poseidon::Dev::DebugOverlay::SetExtraOverlay(DrawVRStatus);
     if (!vr.IsFake())
     {
         if (s_gamepad.Create())
@@ -865,7 +946,10 @@ void EngineGL33::InitVR()
 void EngineGL33::ShutdownVR()
 {
     if (_vrActive)
+    {
         Poseidon::Dev::DebugOverlay::SetExtraTab(nullptr, nullptr);
+        Poseidon::Dev::DebugOverlay::SetExtraOverlay(nullptr);
+    }
     s_gamepad.Destroy();
     s_aimValid = false;
     s_weaponValid = false;
@@ -1001,11 +1085,13 @@ bool EngineGL33::VRWeaponTwoHanded() const
     return _vrActive && s_weaponValid && s_twoHanded;
 }
 
-bool EngineGL33::VRHandPosition(int hand, Vector3& world) const
+bool EngineGL33::VRHandPose(int hand, Matrix4& world) const
 {
-    if (!_vrActive || !s_weaponValid || hand < 0 || hand > 1 || !s_frame.grip[hand].valid)
+    if (!_vrActive || !s_weaponValid || hand < 0 || hand > 1 || !s_frame.grip[hand].valid ||
+        !s_frame.aim[hand].valid)
         return false;
-    world = TrackedToWorld(s_frame.grip[hand].position);
+    world.SetOrientation(s_bodyYaw * ToEngineOrientation(s_frame.aim[hand].orientation));
+    world.SetPosition(TrackedToWorld(s_frame.grip[hand].position));
     return true;
 }
 

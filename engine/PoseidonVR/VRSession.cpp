@@ -294,9 +294,27 @@ void FillFakeFrame(StereoFrame& out)
     s_controllers = ControllerState{};
     s_controllers.grip[0] = 1.0f;
 
+    // CWR_VR_FAKE_SCRIPT=lefthand: left hand free, out to the left and
+    // turned 60 degrees outwards (checks the free left arm).
+    static const char* script = std::getenv("CWR_VR_FAKE_SCRIPT");
+    if (script && std::strcmp(script, "lefthand") == 0)
+    {
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+        {
+            p->position[0] = -0.35f;
+            p->position[1] = -0.25f + headY;
+            p->position[2] = -0.35f;
+            // 60 degrees about +Y (turned to the left)
+            p->orientation[0] = 0.0f;
+            p->orientation[1] = 0.5f;
+            p->orientation[2] = 0.0f;
+            p->orientation[3] = 0.8660254f;
+        }
+        s_controllers.grip[0] = 0.0f;
+    }
+
     // CWR_VR_FAKE_SCRIPT=reload: eject (B), left hand to the chest pouch and
     // grab, to the magazine well under the weapon, let go.
-    static const char* script = std::getenv("CWR_VR_FAKE_SCRIPT");
     if (script && std::strcmp(script, "reload") == 0)
     {
         const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count();

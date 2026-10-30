@@ -83,6 +83,7 @@ bool s_selectMemoryTab = false;  // one-shot: force-select the Memory tab next d
 const char* s_extraTabName = nullptr;
 void (*s_extraTabDraw)() = nullptr;
 unsigned int s_renderTarget = 0; // VR: framebuffer Render() draws into
+void (*s_extraOverlay)() = nullptr; // VR: always-on status text
 SDL_Window* s_window = nullptr;
 // Saved mouse-grab state while the dev panel holds the cursor released.
 bool s_mouseReleasedByPanel = false;
@@ -1773,6 +1774,8 @@ void NewFrame()
     ImGui::NewFrame();
     if (s_visible)
         DrawMainWindow();
+    if (s_extraOverlay)
+        s_extraOverlay();
 }
 
 void Render()
@@ -1831,6 +1834,10 @@ void SetExtraTab(const char* name, void (*draw)())
 void SetRenderTarget(unsigned int framebuffer)
 {
     s_renderTarget = framebuffer;
+}
+void SetExtraOverlay(void (*draw)())
+{
+    s_extraOverlay = draw;
 }
 
 void RequestDeferredReload(const char* modPath)

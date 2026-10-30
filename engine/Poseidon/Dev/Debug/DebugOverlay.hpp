@@ -52,6 +52,8 @@ namespace DebugOverlay
     // VR: GL framebuffer Render() draws into (0 = the window, the default);
     // the VR backend points it at the HUD layer's target in stereo frames.
     void SetRenderTarget(unsigned int framebuffer);
+    // VR: drawn every frame (panel shown or not), for in-headset status text.
+    void SetExtraOverlay(void (*draw)());
 
     // Returns true if the focused ImGui widget wants to swallow keyboard /
     // mouse events.  Callers should drop the SDL event before passing it to

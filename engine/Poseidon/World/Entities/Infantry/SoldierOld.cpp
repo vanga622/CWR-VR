@@ -847,13 +847,20 @@ bool Man::VRArmsTransform(Matrix4& right, Matrix4& left) const
     right = vrWeapon * Matrix4(MInverseGeneral, animated);
     left = right;
 
-    Matrix4 weaponWorld;
-    Vector3 leftHand;
-    if (!GEngine->VRWeaponTwoHanded() && GEngine->VRWeaponPose(weaponWorld) && GEngine->VRHandPosition(0, leftHand))
+    // Free left hand: from the fore-end, turned by how far the controller is
+    // turned from the weapon, and carried to the controller.
+    Matrix4 weaponWorld, leftHand;
+    if (!GEngine->VRWeaponTwoHanded() && GEngine->VRWeaponPose(weaponWorld) && GEngine->VRHandPose(0, leftHand))
     {
-        const Vector3 foreEnd = weaponWorld.Position() + weaponWorld.Direction() * GEngine->VRForeEndForward();
         const Matrix4 toModel = GetInvTransform();
-        left = Matrix4(MTranslation, toModel.FastTransform(leftHand) - toModel.FastTransform(foreEnd)) * right;
+        const Vector3 foreEnd =
+            toModel.FastTransform(weaponWorld.Position() + weaponWorld.Direction() * GEngine->VRForeEndForward());
+        const Matrix3 turn = (toModel.Orientation() * leftHand.Orientation()) *
+                             (toModel.Orientation() * weaponWorld.Orientation()).InverseRotation();
+        Matrix4 rotate = MIdentity;
+        rotate.SetOrientation(turn);
+        left = Matrix4(MTranslation, toModel.FastTransform(leftHand.Position())) * rotate *
+               Matrix4(MTranslation, -foreEnd) * right;
     }
     return true;
 }

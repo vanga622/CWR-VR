@@ -61,10 +61,10 @@ struct VRConfig
     float pouchForward = 0.20f;
     float pouchDown = 0.50f;
     float pouchRight = -0.05f;
-    float pouchRadius = 0.20f;
+    float pouchRadius = 0.30f;
     float wellForward = 0.05f;   // magazine well: ahead of the weapon centre
     float wellDown = 0.10f;      // and below it
-    float wellRadius = 0.12f;
+    float wellRadius = 0.18f;
     float chargeBack = 0.20f;    // charging handle: behind the weapon centre
     float chargeUp = 0.05f;
     float chargeRadius = 0.12f;

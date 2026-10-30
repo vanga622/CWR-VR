@@ -425,9 +425,10 @@ class Engine : public IGraphicsEngine
     virtual int VRTakeReloadEvent() { return VRReloadNone; }
     // VR: the left hand is on the weapon (two-handed hold) this frame.
     virtual bool VRWeaponTwoHanded() const { return false; }
-    // VR: world position of a tracked hand (0 left, 1 right), where it
-    // grips the controller; false when not tracked.
-    virtual bool VRHandPosition(int /*hand*/, Vector3& /*world*/) const { return false; }
+    // VR: world pose of a tracked hand (0 left, 1 right): where it grips the
+    // controller, oriented like the controller's pointing ray (+Z), the same
+    // frame the weapon pose uses; false when not tracked.
+    virtual bool VRHandPose(int /*hand*/, Matrix4& /*world*/) const { return false; }
     // VR: where the animation's left hand holds the weapon (fore-end), metres
     // ahead of the weapon centre.
     virtual float VRForeEndForward() const { return 0.25f; }

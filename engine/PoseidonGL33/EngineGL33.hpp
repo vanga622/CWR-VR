@@ -612,7 +612,7 @@ class EngineGL33 : public Engine
     void VRSetMagazineState(bool loaded, int spares, bool chambered) override;
     int VRTakeReloadEvent() override;
     bool VRWeaponTwoHanded() const override;
-    bool VRHandPosition(int hand, Vector3& world) const override;
+    bool VRHandPose(int hand, Matrix4& world) const override;
     float VRForeEndForward() const override;
 
   protected:
