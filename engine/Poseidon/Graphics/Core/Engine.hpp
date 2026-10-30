@@ -420,6 +420,9 @@ class Engine : public IGraphicsEngine
         VRReloadInsert, // magazine from the pouch pushed into the well
         VRReloadCharge, // charging handle pulled back
     };
+    // VR: World reports each frame whether a dialog is open (UI pointer on).
+    virtual void VRSetDialogOpen(bool /*open*/) {}
+
     virtual bool VRManualReload() const { return false; }
     virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/) {}
     virtual int VRTakeReloadEvent() { return VRReloadNone; }

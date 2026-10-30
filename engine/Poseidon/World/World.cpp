@@ -1270,6 +1270,10 @@ void World::Simulate(float deltaT, bool& enableDraw)
 
     bool clear = true;
 
+    // VR: any dialog up (pause and mission-end/death screens, briefing,
+    // map, warnings) makes the right controller a mouse pointer.
+    GEngine->VRSetDialogOpen(_warningMessage || _options || _userDlg || (_map && _showMap));
+
     if (_warningMessage)
     {
         _warningMessage->OnSimulate(nullptr);

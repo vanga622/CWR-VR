@@ -232,7 +232,8 @@ float s_horizontalShift[2] = {0.0f, 0.0f}; // x, z: keeps the body under the hea
 
 // Menu pointer (M5): right controller ray -> UI cursor, trigger -> click.
 bool s_pointerDown = false;
-bool s_uiInput = true; // UI (pointer) rather than gameplay this frame
+bool s_uiInput = true;    // UI (pointer) rather than gameplay this frame
+bool s_dialogOpen = false; // World: a dialog is up (Engine::VRSetDialogOpen)
 
 // Manual reload (M6): the soldier's weapon state (VRSetMagazineState) and
 // the gesture in progress.
@@ -1036,8 +1037,16 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         s_bodyYaw = YawMatrix(s_playerYaw);
         UpdateWeaponPose();
         const auto ctx = Poseidon::InputSubsystem::Instance().GetContext();
-        s_uiInput = ctx == Poseidon::InputContext::Menu || ctx == Poseidon::InputContext::Map ||
+        const bool wasUi = s_uiInput;
+        s_uiInput = s_dialogOpen || ctx == Poseidon::InputContext::Menu || ctx == Poseidon::InputContext::Map ||
                     ctx == Poseidon::InputContext::Spectator || Poseidon::Dev::DebugOverlay::IsVisible();
+        if (s_uiInput != wasUi)
+        {
+            char line[96];
+            std::snprintf(line, sizeof(line), "Pointer %s (dialog %d, input context %d)", s_uiInput ? "on" : "off",
+                          s_dialogOpen, static_cast<int>(ctx));
+            PoseidonVR::VRSession::Instance().LogLine(line);
+        }
         UpdatePointer(s_frame.aim[1], HudSurface(), s_uiInput, _sdlWindow ? SDL_GetWindowID(_sdlWindow) : 0, _w, _h);
         const float headXr[3] = {(eyes[0].position[0] + eyes[1].position[0]) * 0.5f,
                                  (eyes[0].position[1] + eyes[1].position[1]) * 0.5f,
@@ -1152,6 +1161,11 @@ bool EngineGL33::VRHeadDrop(float& metres) const
     return true;
 }
 
+void EngineGL33::VRSetDialogOpen(bool open)
+{
+    s_dialogOpen = open;
+}
+
 bool EngineGL33::VRManualReload() const
 {
     return _vrActive && s_weaponValid && PoseidonVR::VRSession::Instance().Config().manualReload >= 0.5f;
@@ -1221,8 +1235,9 @@ void EngineGL33::SubmitVRFrame()
     _vrStereoFrame = false;
     _vrFrameAttempted = false;
     _vrEyeTarget = -1;
-    // World reports the body again next frame if the camera is still on it.
+    // World reports the body and dialogs again next frame.
     s_bodyId = nullptr;
+    s_dialogOpen = false;
 }
 
 void EngineGL33::SubmitVRStereoFrame()

@@ -825,7 +825,8 @@ bool Man::VRWeaponModelMatrix(Matrix4& out, bool firing) const
 // animation holds it) to the left controller.
 bool Man::VRArmsTransform(Matrix4& right, Matrix4& left) const
 {
-    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0)
+    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0 ||
+        IsDead())
         return false;
     const WeaponType* weapon = GetMagazineSlot(_currentWeapon)._weapon;
     if (!weapon)
@@ -995,7 +996,9 @@ int Man::VRArmBones(BlendAnimInfo* out, bool leftArm) const
 // seen from their own eyes.
 bool Man::IsVRHeldWeaponProxy(int level, const ProxyObject& proxy) const
 {
-    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0)
+    // A dead soldier lets go: the weapon falls back to the animation.
+    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0 ||
+        IsDead())
         return false;
     const WeaponType* weapon = GetMagazineSlot(_currentWeapon)._weapon;
     if (!weapon)

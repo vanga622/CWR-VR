@@ -609,6 +609,7 @@ class EngineGL33 : public Engine
     void VRSetProne(bool prone) override;
     void VRSetPlayerBody(const void* id, const Matrix3& orientation, bool soldier, float groundY) override;
     bool VRManualReload() const override;
+    void VRSetDialogOpen(bool open) override;
     void VRSetMagazineState(bool loaded, int spares, bool chambered) override;
     int VRTakeReloadEvent() override;
     bool VRWeaponTwoHanded() const override;
