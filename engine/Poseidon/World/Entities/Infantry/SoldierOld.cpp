@@ -820,8 +820,10 @@ bool Man::VRWeaponModelMatrix(Matrix4& out, bool firing) const
 // both hands; moving the arm bones by the same delta that moves the weapon
 // from its animated pose to the controller keeps the hands on it.  Hands and
 // forearms move fully, upper arms half way so the elbow bends instead of the
-// arm leaving the shoulder.  The left arm only follows in a two-handed hold.
-bool Man::VRArmsTransform(Matrix4& delta, bool& twoHanded) const
+// arm leaving the shoulder.  The left arm rides with the weapon in a
+// two-handed hold; otherwise it is moved on from the fore-end (where the
+// animation holds it) to the left controller.
+bool Man::VRArmsTransform(Matrix4& right, Matrix4& left) const
 {
     if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || _currentWeapon < 0)
         return false;
@@ -842,8 +844,17 @@ bool Man::VRArmsTransform(Matrix4& delta, bool& twoHanded) const
 
     const int memory = _shape->FindMemoryLevel();
     const Matrix4 animated = base::AnimateProxyMatrix(memory, _shape->MemoryLevel()->Proxy(weaponIndex));
-    delta = vrWeapon * Matrix4(MInverseGeneral, animated);
-    twoHanded = GEngine->VRWeaponTwoHanded();
+    right = vrWeapon * Matrix4(MInverseGeneral, animated);
+    left = right;
+
+    Matrix4 weaponWorld;
+    Vector3 leftHand;
+    if (!GEngine->VRWeaponTwoHanded() && GEngine->VRWeaponPose(weaponWorld) && GEngine->VRHandPosition(0, leftHand))
+    {
+        const Vector3 foreEnd = weaponWorld.Position() + weaponWorld.Direction() * GEngine->VRForeEndForward();
+        const Matrix4 toModel = GetInvTransform();
+        left = Matrix4(MTranslation, toModel.FastTransform(leftHand) - toModel.FastTransform(foreEnd)) * right;
+    }
     return true;
 }
 
@@ -862,6 +873,12 @@ int Man::VRWantedStanceAction(int actPos) const
         return -1;
     const bool prone = IsDown();
     GEngine->VRSetProne(prone);
+    static bool s_lastProne = false; // stance changes in the game log
+    if (prone != s_lastProne)
+    {
+        LOG_INFO(Graphics, "VR: soldier {} (head {:.2f} m below standing)", prone ? "prone" : "standing", drop);
+        s_lastProne = prone;
+    }
     const float proneAt = GEngine->VRProneDrop();
     const float hysteresis = 0.10f;
     if (!prone && drop > proneAt)
@@ -891,6 +908,8 @@ void Man::VRReloadStep()
         case Engine::VRReloadEject:
             if (Magazine* magazine = current._magazine)
             {
+                Foundation::GlobalShowMessage(1500, "Magazine out (%d rounds) - take one from the chest pouch",
+                                              static_cast<int>(magazine->_ammo));
                 _vrLastMagType = magazine->_type;
                 if (magazine->_ammo <= 0)
                     _vrChambered = false;
@@ -910,10 +929,14 @@ void Man::VRReloadStep()
                 PlayReloadMagazineSound(_currentWeapon, muzzle);
             LOG_INFO(Graphics, "VR: reload insert {} ({} rounds)", loaded ? "done" : "failed",
                      loaded ? static_cast<int>(current._magazine->_ammo) : 0);
+            if (loaded)
+                Foundation::GlobalShowMessage(1500, _vrChambered ? "Magazine in (%d)" : "Magazine in (%d) - pull the charging handle",
+                                              static_cast<int>(current._magazine->_ammo));
             break;
         }
         case Engine::VRReloadCharge:
             _vrChambered = true;
+            Foundation::GlobalShowMessage(1000, "Charged");
             break;
         default:
             break;
@@ -929,7 +952,7 @@ void Man::VRReloadStep()
     GEngine->VRSetMagazineState(current._magazine != nullptr, spares, _vrChambered);
 }
 
-int Man::VRArmBones(BlendAnimInfo* out, bool twoHanded) const
+int Man::VRArmBones(BlendAnimInfo* out, bool leftArm) const
 {
     static const struct
     {
@@ -944,7 +967,7 @@ int Man::VRArmBones(BlendAnimInfo* out, bool twoHanded) const
     int n = 0;
     for (const auto& b : kBones)
     {
-        if (b.left && !twoHanded)
+        if (b.left != leftArm)
             continue;
         for (int i = 0; skeleton && i < skeleton->NBones(); i++)
         {

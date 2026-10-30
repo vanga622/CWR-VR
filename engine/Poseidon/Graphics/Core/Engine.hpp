@@ -400,10 +400,15 @@ class Engine : public IGraphicsEngine
     // prone now (the view height depends on it).
     virtual float VRProneDrop() const { return 0.65f; }
     virtual void VRSetProne(bool /*prone*/) {}
-    // VR: the object the player sees through this frame (soldier or vehicle)
-    // and its body orientation; called by World before drawing, not called
-    // when the camera is elsewhere (cutscene, free camera).
-    virtual void VRSetPlayerBody(const void* /*id*/, const Matrix3& /*orientation*/) {}
+    // VR: the object the player sees through this frame (soldier or vehicle),
+    // its body orientation, whether it is a soldier, and the terrain height
+    // under it (to learn the soldier's eye height for a true-to-life standing
+    // view).  Called by World before drawing, not called when the camera is
+    // elsewhere (cutscene, free camera).
+    virtual void VRSetPlayerBody(const void* /*id*/, const Matrix3& /*orientation*/, bool /*soldier*/,
+                                 float /*groundY*/)
+    {
+    }
 
     // VR (M6): manual reload.  The soldier reports his weapon each frame
     // (magazine in, spare magazines, round chambered); the backend turns
@@ -420,6 +425,12 @@ class Engine : public IGraphicsEngine
     virtual int VRTakeReloadEvent() { return VRReloadNone; }
     // VR: the left hand is on the weapon (two-handed hold) this frame.
     virtual bool VRWeaponTwoHanded() const { return false; }
+    // VR: world position of a tracked hand (0 left, 1 right), where it
+    // grips the controller; false when not tracked.
+    virtual bool VRHandPosition(int /*hand*/, Vector3& /*world*/) const { return false; }
+    // VR: where the animation's left hand holds the weapon (fore-end), metres
+    // ahead of the weapon centre.
+    virtual float VRForeEndForward() const { return 0.25f; }
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

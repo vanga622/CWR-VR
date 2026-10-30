@@ -117,12 +117,14 @@ const ConfigKey kConfigKeys[] = {
     {"controls", "smooth_turn", &VRConfig::smoothTurn, "right stick turning: 0 = snap, 1 = smooth"},
     {"controls", "snap_angle", &VRConfig::snapAngle, "degrees per snap turn"},
     {"controls", "smooth_speed", &VRConfig::smoothSpeed, "smooth turn speed, degrees per second"},
-    {"controls", "head_locomotion", &VRConfig::headLocomotion,
-     "1 = left stick moves where you look, 0 = where the body faces"},
+    {"controls", "locomotion", &VRConfig::locomotion,
+     "left stick forward: 0 = where the body faces, 1 = where you look, 2 = where the left controller points"},
     {"weapon", "offset_forward", &VRConfig::weaponForward, "weapon centre ahead of the right hand, metres"},
     {"weapon", "offset_up", &VRConfig::weaponUp, "weapon centre above the right hand, metres"},
     {"weapon", "offset_right", &VRConfig::weaponRight, "weapon centre right of the right hand, metres"},
     {"weapon", "two_handed", &VRConfig::twoHanded, "1 = left grip near the weapon aims it with both hands"},
+    {"weapon", "foreend_forward", &VRConfig::foreEndForward,
+     "where the soldier's left hand holds the weapon, ahead of its centre, metres"},
     {"weapon", "zero_yaw", &VRConfig::zeroYaw, "zeroing, degrees: + moves hits right"},
     {"weapon", "zero_pitch", &VRConfig::zeroPitch, "zeroing, degrees: + moves hits up"},
     {"weapon", "muzzle_right", &VRConfig::muzzleRight, "shot origin shift, cm: + moves hits right at every distance"},
@@ -286,6 +288,8 @@ void FillFakeFrame(StereoFrame& out)
             p->position[2] = handPos[i][2];
         }
     }
+    // A 1.70 m eye height above the real floor.
+    out.headHeight = 1.70f + headY;
     // Left grip held, so the two-handed path is what the screenshots show.
     s_controllers = ControllerState{};
     s_controllers.grip[0] = 1.0f;
@@ -361,6 +365,7 @@ struct State
     XrSession session = XR_NULL_HANDLE;
     XrSpace localSpace = XR_NULL_HANDLE;
     XrSpace viewSpace = XR_NULL_HANDLE;
+    XrSpace stageSpace = XR_NULL_HANDLE; // floor level, when the runtime has one
     int64_t format = 0;
     Swapchain screen;  // flat virtual screen
     Swapchain eyes[2]; // stereo
@@ -866,6 +871,8 @@ void DestroyAll()
     for (Swapchain* sc : {&s.screen, &s.hud, &s.eyes[0], &s.eyes[1]})
         if (sc->handle != XR_NULL_HANDLE)
             xrDestroySwapchain(sc->handle);
+    if (s.stageSpace != XR_NULL_HANDLE)
+        xrDestroySpace(s.stageSpace);
     if (s.viewSpace != XR_NULL_HANDLE)
         xrDestroySpace(s.viewSpace);
     if (s.localSpace != XR_NULL_HANDLE)
@@ -1210,6 +1217,9 @@ bool VRSession::Init()
         DestroyAll();
         return false;
     }
+    // Optional: the real floor, for true-to-life standing eye height.
+    if (!CreateSpace(XR_REFERENCE_SPACE_TYPE_STAGE, s.stageSpace, "xrCreateReferenceSpace(STAGE)"))
+        Log("No STAGE space: standing height falls back to the soldier's own eyes");
 
     Log("Session created; waiting for the runtime to make it READY");
     return true;
@@ -1336,6 +1346,14 @@ bool VRSession::BeginStereoFrame(StereoFrame& out)
         LocateHand(s.aimSpace[i], out.aim[i]);
         s_grip[i] = out.grip[i];
         s_aim[i] = out.aim[i];
+    }
+    out.headHeight = -1.0f;
+    if (s.stageSpace != XR_NULL_HANDLE)
+    {
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(xrLocateSpace(s.viewSpace, s.stageSpace, s.predictedDisplayTime, &loc)) &&
+            (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+            out.headHeight = loc.pose.position.y;
     }
     out.eyeWidth = s.eyes[0].width;
     out.eyeHeight = s.eyes[0].height;

@@ -966,8 +966,8 @@ class Man: public Person
 	bool _vrChambered = true;
 	const MagazineType *_vrLastMagType = nullptr;
 	// VR (M5): arm bones follow the weapon in the controller.
-	bool VRArmsTransform( Matrix4 &delta, bool &twoHanded ) const;
-	int VRArmBones( BlendAnimInfo *out, bool twoHanded ) const;
+	bool VRArmsTransform( Matrix4 &right, Matrix4 &left ) const;
+	int VRArmBones( BlendAnimInfo *out, bool leftArm ) const;
 	void AnimateMatrix( Matrix4 &mat, int level, int selection ) const override;
 
 	void AnimateMatrix( Matrix4 &mat, const AnimationRTWeight &wgt ) const;

@@ -82,6 +82,12 @@ bool s_snapArmed = true;
 // from ordinary turning.
 const void* s_bodyId = nullptr;
 float s_bodyHeading = 0.0f;
+bool s_bodySoldier = false;
+float s_bodyGroundY = 0.0f;
+// The standing soldier's eyes above the ground, learnt where he stands on
+// open terrain (camera minus terrain height, when plausible).
+float s_soldierEyeHeight = 1.75f;
+bool s_soldierEyeKnown = false;
 const void* s_lastBodyId = nullptr;
 Vector3 s_lastCameraPos(0, 0, 0);
 bool s_recentreHeld = false;
@@ -123,7 +129,8 @@ float WrapAngle(float a)
 // out, a cutscene camera) or the camera jumping in one frame (teleport).
 // Ordinary turning never re-syncs: the soldier may lag behind a fast real
 // turn, but the view stays the player's.
-void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const Vector3& cameraPos)
+void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const Vector3& cameraPos, bool leftValid,
+                   float leftYaw)
 {
     const auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - s_lastTurnTime).count();
@@ -145,7 +152,10 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const V
         s_yawValid = true;
         ++s_recentreCount;
         LOG_INFO(Graphics, "VR: recentred");
-        vr.LogLine(recentre ? "Recentred (right stick click)" : "Recentred (first stereo frame)");
+        char line[128];
+        std::snprintf(line, sizeof(line), "Recentred (%s), eyes %.2f m above the floor",
+                      recentre ? "right stick click" : "first stereo frame", s_frame.headHeight);
+        vr.LogLine(line);
     }
 
     if (c.active)
@@ -183,10 +193,20 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const V
     s_lastBodyId = s_bodyId;
     s_lastCameraPos = cameraPos;
 
-    // The game moves the soldier relative to its body; turn the stick from
-    // the view (or keep it on the body) accordingly.
+    // The game moves the soldier relative to its body; turn the stick so
+    // "forward" is the chosen direction.  The left controller (default)
+    // lets the player look around while walking straight; the head is
+    // "walk where I look"; the body follows the weapon.  Yaws of the head
+    // and the left controller are in tracking space, so add the player's
+    // heading.
     const float bodyYaw = s_bodyId ? s_bodyHeading : gameYaw;
-    s_moveYaw = cfg.headLocomotion >= 0.5f ? WrapAngle(s_playerYaw + headYaw - bodyYaw) : 0.0f;
+    const int mode = static_cast<int>(cfg.locomotion + 0.5f);
+    float forwardYaw = bodyYaw;
+    if (mode == 2 && leftValid)
+        forwardYaw = s_playerYaw + leftYaw;
+    else if (mode >= 1)
+        forwardYaw = s_playerYaw + headYaw;
+    s_moveYaw = WrapAngle(forwardYaw - bodyYaw);
 }
 
 // Weapon in the right hand (M4).
@@ -344,11 +364,43 @@ void UpdateHeadDrop(const Vector3& headPos)
     s_headDrop = -belowStand;
     s_headDropValid = true;
 
-    // TrackedOffset's y is headPos - origin; shift it to the height wanted.
+    // Learn the standing soldier's eye height on open ground (indoors the
+    // camera is a floor above the terrain and the value is out of range).
+    if (s_bodyId && s_bodySoldier && !s_gameProne)
+    {
+        const float eye = s_gameCamera.Position().Y() - s_bodyGroundY;
+        if (eye > 1.3f && eye < 2.1f)
+        {
+            s_soldierEyeHeight = s_soldierEyeKnown ? s_soldierEyeHeight + (eye - s_soldierEyeHeight) * 0.02f : eye;
+            if (!s_soldierEyeKnown)
+            {
+                char line[96];
+                std::snprintf(line, sizeof(line), "Soldier's eyes %.2f m above the ground, yours %.2f m", eye,
+                              s_frame.headHeight);
+                PoseidonVR::VRSession::Instance().LogLine(line);
+            }
+            s_soldierEyeKnown = true;
+        }
+    }
+
+    // TrackedOffset's y is headPos - origin; shift it to the height wanted
+    // (relative to the game camera).
     const float fromOrigin = headPos.Y() - s_headOrigin.Y();
     float wanted = fromOrigin;
     if (cfg.physicalStance >= 0.5f)
-        wanted = s_gameProne ? 0.0f : belowStand;
+    {
+        if (s_gameProne)
+            wanted = 0.0f; // the prone soldier's own eyes
+        else if (s_bodyId && s_bodySoldier && s_frame.headHeight > 0.0f)
+            // Standing soldier, real floor known: eyes as high above his feet
+            // as the player's are above the floor, so standing feels like
+            // standing and a real crouch is a crouch.  His feet are his eyes
+            // minus his own (calibrated) eye height, which also holds on
+            // building floors.
+            wanted = s_frame.headHeight - s_soldierEyeHeight;
+        else
+            wanted = belowStand; // no floor: the soldier's eyes, lowered by a real crouch
+    }
     s_verticalShift = wanted - fromOrigin + cfg.eyeHeight;
 
     // Sideways/forward: the soldier does not walk with the player's real
@@ -542,26 +594,51 @@ void UpdateReload(const float headXr[3])
     const PoseidonVR::HandPose& leftGrip = s_frame.grip[0];
     if (cfg.manualReload < 0.5f || !s_weaponValid || !s_magStateValid || s_uiInput || !leftGrip.valid)
     {
+        if (ejectPress)
+        {
+            char line[160];
+            std::snprintf(line, sizeof(line),
+                          "Reload: B ignored (manual %d, weapon tracked %d, soldier reported %d, UI %d, left hand %d)",
+                          cfg.manualReload >= 0.5f, s_weaponValid, s_magStateValid, s_uiInput, leftGrip.valid);
+            vr.LogLine(line);
+        }
         s_magInHand = s_charging = false;
+        s_magStateValid = false;
         return;
     }
     const Vector3 left = TrackedToWorld(leftGrip.position);
     const Matrix4& weapon = s_weaponWorld;
 
-    if (ejectPress && s_magLoaded)
+    if (ejectPress)
     {
-        s_reloadEvent = Engine::VRReloadEject;
-        vr.Haptic(1, 0.5f, 0.05f);
+        if (s_magLoaded)
+        {
+            s_reloadEvent = Engine::VRReloadEject;
+            vr.Haptic(1, 0.5f, 0.05f);
+        }
+        vr.LogLine(s_magLoaded ? "Reload: eject" : "Reload: B with no magazine in");
     }
 
     // Pouch: on the chest, placed from the head along the body's heading.
     const Matrix3 body = s_bodyId ? YawMatrix(s_bodyHeading) : s_bodyYaw;
     const Vector3 pouch = TrackedToWorld(headXr) + body.Direction() * cfg.pouchForward - VUp * cfg.pouchDown +
                           body.DirectionAside() * cfg.pouchRight;
-    if (!s_magInHand && gripPress && !s_magLoaded && s_magSpares > 0 && (left - pouch).Size() < cfg.pouchRadius)
+    if (!s_magInHand && gripPress && !s_magLoaded)
     {
-        s_magInHand = true;
-        vr.Haptic(0, 0.6f, 0.06f);
+        const float dist = (left - pouch).Size();
+        char line[128];
+        if (s_magSpares > 0 && dist < cfg.pouchRadius)
+        {
+            s_magInHand = true;
+            vr.Haptic(0, 0.6f, 0.06f);
+            std::snprintf(line, sizeof(line), "Reload: magazine taken from the pouch (%.2f m from it)", dist);
+        }
+        else
+        {
+            std::snprintf(line, sizeof(line), "Reload: left grip %.2f m from the pouch (radius %.2f), %d spare", dist,
+                          cfg.pouchRadius, s_magSpares);
+        }
+        vr.LogLine(line);
     }
 
     if (s_magInHand)
@@ -574,10 +651,15 @@ void UpdateReload(const float headXr[3])
             s_magInHand = false;
             vr.Haptic(0, 0.8f, 0.08f);
             vr.Haptic(1, 0.5f, 0.06f);
+            vr.LogLine("Reload: magazine inserted");
         }
         else if (!gripNow)
         {
             s_magInHand = false; // let go away from the weapon: back to the pouch
+            char line[96];
+            std::snprintf(line, sizeof(line), "Reload: magazine let go %.2f m from the well (radius %.2f)",
+                          (left - well).Size(), cfg.wellRadius);
+            vr.LogLine(line);
         }
     }
 
@@ -604,6 +686,7 @@ void UpdateReload(const float headXr[3])
                 s_charging = false;
                 vr.Haptic(0, 0.9f, 0.08f);
                 vr.Haptic(1, 0.5f, 0.05f);
+                vr.LogLine("Reload: charged");
             }
         }
     }
@@ -686,9 +769,14 @@ void DrawVRTab()
         ImGui::SliderFloat("Turn speed (deg/s)", &c.smoothSpeed, 30.0f, 360.0f, "%.0f");
     else
         ImGui::SliderFloat("Snap angle (deg)", &c.snapAngle, 10.0f, 90.0f, "%.0f");
-    bool headMove = c.headLocomotion >= 0.5f;
-    if (ImGui::Checkbox("Walk where I look", &headMove))
-        c.headLocomotion = headMove ? 1.0f : 0.0f;
+    int locomotion = static_cast<int>(c.locomotion + 0.5f);
+    ImGui::TextUnformatted("Left stick forward is:");
+    ImGui::RadioButton("Body", &locomotion, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("Head", &locomotion, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton("Left controller", &locomotion, 2);
+    c.locomotion = static_cast<float>(locomotion);
     const PoseidonVR::ControllerState& pad = vr.Controllers();
     ImGui::TextDisabled("Sticks L %.2f %.2f  R %.2f %.2f  Triggers %.2f %.2f  Grips %.2f %.2f%s", pad.moveX,
                         pad.moveY, pad.turnX, pad.turnY, pad.trigger[0], pad.trigger[1], pad.grip[0], pad.grip[1],
@@ -722,7 +810,11 @@ void DrawVRTab()
     ImGui::SliderFloat("Prone at drop (m)", &c.proneDrop, 0.4f, 1.2f, "%.2f");
     ImGui::SliderFloat("Eye height (m)", &c.eyeHeight, -0.3f, 0.3f, "%.2f");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Raise if standing upright still feels crouched (the soldier is shorter than you).");
+        ImGui::SetTooltip("Fine-tune the standing view height (it already follows your real height above the floor).");
+    if (s_frame.headHeight > 0.0f)
+        ImGui::TextDisabled("Eyes above your floor: %.2f m", s_frame.headHeight);
+    else
+        ImGui::TextDisabled("Runtime gives no floor level: standing view = the soldier's eyes");
     ImGui::SliderFloat("Free lean (m)", &c.leanFree, 0.0f, 0.3f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("How far the head may move sideways/forward before the body stays under it.");
@@ -830,8 +922,10 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
         // never tilts the world.
         const auto& eyes = s_frame.eyes;
         const Vector3 headPos = (ToEnginePosition(eyes[0].position) + ToEnginePosition(eyes[1].position)) * 0.5f;
+        const PoseidonVR::HandPose& leftAim = s_frame.aim[0];
         UpdateHeading(HeadingOf(ToEngineOrientation(eyes[0].orientation)), headPos, HeadingOf(s_gameCamera.Orientation()),
-                      s_gameCamera.Position());
+                      s_gameCamera.Position(), leftAim.valid,
+                      leftAim.valid ? HeadingOf(ToEngineOrientation(leftAim.orientation)) : 0.0f);
         UpdateHeadDrop(headPos);
         s_bodyYaw = YawMatrix(s_playerYaw);
         UpdateWeaponPose();
@@ -907,6 +1001,19 @@ bool EngineGL33::VRWeaponTwoHanded() const
     return _vrActive && s_weaponValid && s_twoHanded;
 }
 
+bool EngineGL33::VRHandPosition(int hand, Vector3& world) const
+{
+    if (!_vrActive || !s_weaponValid || hand < 0 || hand > 1 || !s_frame.grip[hand].valid)
+        return false;
+    world = TrackedToWorld(s_frame.grip[hand].position);
+    return true;
+}
+
+float EngineGL33::VRForeEndForward() const
+{
+    return PoseidonVR::VRSession::Instance().Config().foreEndForward;
+}
+
 bool EngineGL33::VRWeaponPose(Matrix4& world, bool firing) const
 {
     if (!_vrActive || !s_weaponValid)
@@ -957,10 +1064,12 @@ int EngineGL33::VRTakeReloadEvent()
     return ev;
 }
 
-void EngineGL33::VRSetPlayerBody(const void* id, const Matrix3& orientation)
+void EngineGL33::VRSetPlayerBody(const void* id, const Matrix3& orientation, bool soldier, float groundY)
 {
     s_bodyId = id;
     s_bodyHeading = HeadingOf(orientation);
+    s_bodySoldier = soldier;
+    s_bodyGroundY = groundY;
 }
 
 float EngineGL33::VRProneDrop() const

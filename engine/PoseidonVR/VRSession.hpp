@@ -30,13 +30,14 @@ struct VRConfig
     float smoothTurn = 0.0f;     // 0 = snap turn, 1 = smooth turn
     float snapAngle = 30.0f;     // degrees per snap
     float smoothSpeed = 120.0f;  // degrees per second at full stick
-    float headLocomotion = 1.0f; // 1 = left stick moves where you look, 0 = where the body faces
+    float locomotion = 2.0f;     // left stick "forward": 0 = body, 1 = head, 2 = left controller
     // Weapon placement: where the weapon model's centre sits relative to the
     // right hand, in the controller's aim frame (metres).
     float weaponForward = 0.15f;
     float weaponUp = 0.06f;
     float weaponRight = 0.0f;
     float twoHanded = 1.0f;      // 1 = left grip near the weapon steadies it with both hands
+    float foreEndForward = 0.25f; // where the left hand holds the weapon, ahead of its centre
     // Zeroing: turns the shot (not the model) so hits land on the sights.
     float zeroYaw = 0.0f;        // degrees, + = hits move right
     float zeroPitch = 0.0f;      // degrees, + = hits move up
@@ -113,6 +114,7 @@ struct StereoFrame
     EyeView eyes[2];
     HandPose grip[2]; // [0] left, [1] right: where the hand holds the controller
     HandPose aim[2];  // pointing ray (-Z forward)
+    float headHeight = -1.0f; // eyes above the real floor (STAGE space), metres; < 0 unknown
     int eyeWidth = 0;
     int eyeHeight = 0;
     unsigned int eyeTexture[2] = {0, 0}; // 0 in fake mode: nothing to submit

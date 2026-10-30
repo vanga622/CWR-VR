@@ -901,8 +901,11 @@ void World::Simulate(float deltaT, bool& enableDraw)
         {
             fov = _camFOV[_camType];
             transform = cameraVehicle->Transform();
-            // VR: walking and turning are relative to this body.
-            GEngine->VRSetPlayerBody(cameraVehicle, cameraVehicle->Orientation());
+            // VR: walking and turning are relative to this body; the terrain
+            // under a soldier calibrates the standing view height.
+            GEngine->VRSetPlayerBody(
+                cameraVehicle, cameraVehicle->Orientation(), camAI && camAI->GetType()->IsKindOf(Preloaded(VTypeMan)),
+                _scene.GetLandscape()->SurfaceYAboveWater(transform.Position().X(), transform.Position().Z()));
             // if any vehicle control key is pressed, set to manual control
             // check vehicle control keys
 
