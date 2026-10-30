@@ -38,6 +38,7 @@ struct VRConfig
     float weaponRight = 0.0f;
     float twoHanded = 1.0f;      // 1 = left grip near the weapon steadies it with both hands
     float foreEndForward = 0.25f; // where the left hand holds the weapon, ahead of its centre
+    float foreEndRadius = 0.15f;  // the left grip takes the fore-end only this close to it
     // Zeroing: turns the shot (not the model) so hits land on the sights.
     float zeroYaw = 0.0f;        // degrees, + = hits move right
     float zeroPitch = 0.0f;      // degrees, + = hits move up

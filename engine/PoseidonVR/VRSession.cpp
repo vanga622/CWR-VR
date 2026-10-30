@@ -125,6 +125,8 @@ const ConfigKey kConfigKeys[] = {
     {"weapon", "two_handed", &VRConfig::twoHanded, "1 = left grip near the weapon aims it with both hands"},
     {"weapon", "foreend_forward", &VRConfig::foreEndForward,
      "where the soldier's left hand holds the weapon, ahead of its centre, metres"},
+    {"weapon", "foreend_radius", &VRConfig::foreEndRadius,
+     "the left grip takes the fore-end only with the hand this close to it, metres"},
     {"weapon", "zero_yaw", &VRConfig::zeroYaw, "zeroing, degrees: + moves hits right"},
     {"weapon", "zero_pitch", &VRConfig::zeroPitch, "zeroing, degrees: + moves hits up"},
     {"weapon", "muzzle_right", &VRConfig::muzzleRight, "shot origin shift, cm: + moves hits right at every distance"},
@@ -294,8 +296,9 @@ void FillFakeFrame(StereoFrame& out)
     s_controllers = ControllerState{};
     s_controllers.grip[0] = 1.0f;
 
-    // CWR_VR_FAKE_SCRIPT=lefthand: left hand free, out to the left and
-    // turned 60 degrees outwards (checks the free left arm).
+    // CWR_VR_FAKE_SCRIPT=lefthand: left hand out to the left, turned 60
+    // degrees outwards, grip pressed far from the fore-end (checks the free
+    // left arm, and that a grip away from the weapon does not take it).
     static const char* script = std::getenv("CWR_VR_FAKE_SCRIPT");
     if (script && std::strcmp(script, "lefthand") == 0)
     {
@@ -310,7 +313,7 @@ void FillFakeFrame(StereoFrame& out)
             p->orientation[2] = 0.0f;
             p->orientation[3] = 0.8660254f;
         }
-        s_controllers.grip[0] = 0.0f;
+        s_controllers.grip[0] = 1.0f;
     }
 
     // CWR_VR_FAKE_SCRIPT=reload: eject (B), left hand to the chest pouch and

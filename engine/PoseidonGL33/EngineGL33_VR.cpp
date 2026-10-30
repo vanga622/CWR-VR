@@ -218,6 +218,7 @@ void UpdateHeading(float headYaw, const Vector3& headPos, float gameYaw, const V
 // Weapon in the right hand (M4).
 bool s_weaponValid = false;
 bool s_twoHanded = false;
+bool s_foreGrip = false; // left hand holds the fore-end (until the grip lets go)
 Matrix4 s_weaponWorld;
 
 // Physical stance (M5): head drop below the player's standing height, and
@@ -567,9 +568,25 @@ void UpdateWeaponPose()
     Matrix3 orient = s_bodyYaw * ToEngineOrientation(aim.orientation);
     const Vector3 hand = TrackedToWorld(grip.position);
 
-    // Not while the left hand is busy reloading.
+    // Two-handed hold: the left grip takes the fore-end only when the left
+    // hand is at it (foreend_radius from where the one-handed weapon's
+    // fore-end is), then holds it while the grip stays pressed.  Not while
+    // the left hand is busy reloading.
     const PoseidonVR::HandPose& support = s_frame.grip[0];
-    if (cfg.twoHanded >= 0.5f && vr.Controllers().grip[0] > 0.5f && support.valid && !s_magInHand && !s_charging)
+    const float leftGrip = vr.Controllers().grip[0];
+    const bool canHold = cfg.twoHanded >= 0.5f && support.valid && !s_magInHand && !s_charging;
+    if (!canHold || leftGrip < 0.4f)
+    {
+        s_foreGrip = false;
+    }
+    else if (!s_foreGrip && leftGrip > 0.6f)
+    {
+        const Vector3 centre = hand + orient.Direction() * cfg.weaponForward + orient.DirectionUp() * cfg.weaponUp +
+                               orient.DirectionAside() * cfg.weaponRight;
+        const Vector3 foreEnd = centre + orient.Direction() * cfg.foreEndForward;
+        s_foreGrip = (TrackedToWorld(support.position) - foreEnd).Size() < cfg.foreEndRadius;
+    }
+    if (s_foreGrip)
     {
         Vector3 dir = TrackedToWorld(support.position) - hand;
         const float len = dir.Size();
@@ -862,6 +879,11 @@ void DrawVRTab()
                         pad.moveY, pad.turnX, pad.turnY, pad.trigger[0], pad.trigger[1], pad.grip[0], pad.grip[1],
                         pad.active ? "" : "  (no input focus)");
     ImGui::TextDisabled("Right stick click: recentre (stand up straight for it)");
+
+    ImGui::SeparatorText("Two-handed hold");
+    ImGui::SliderFloat("Fore-end grab radius (m)", &c.foreEndRadius, 0.05f, 0.40f, "%.2f");
+    ImGui::SliderFloat("Fore-end position (m)", &c.foreEndForward, 0.0f, 0.6f, "%.2f");
+    ImGui::TextDisabled("Left hand %s", s_foreGrip ? "holds the fore-end" : "free");
 
     ImGui::SeparatorText("Weapon zeroing");
     ImGui::SliderFloat("Zero yaw (deg, + right)", &c.zeroYaw, -3.0f, 3.0f, "%.2f");
