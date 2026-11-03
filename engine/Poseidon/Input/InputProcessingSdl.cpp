@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <Poseidon/Foundation/Framework/AppFrame.hpp>
+#include <Poseidon/Foundation/Framework/Log.hpp>
 #include <Poseidon/Foundation/Time/Time.hpp>
 #include <Poseidon/Foundation/Types/Memtype.h>
 
@@ -271,10 +272,29 @@ void ProcessMouse_SDL(DWORD timeDelta)
 
 static SDL_Gamepad* sGamepad = nullptr;
 
+// VR: the headset controllers come in as a virtual gamepad of this name
+// (PoseidonVR::VRGamepad).  It must win over any other pad: Virtual Desktop
+// attaches its own emulated Xbox pad, which is found first and stays silent
+// while the OpenXR session has the controllers.
+static bool IsVRGamepad(SDL_JoystickID id)
+{
+    const char* name = SDL_GetGamepadNameForID(id);
+    return name && SDL_strcmp(name, "CWR-VR controllers") == 0;
+}
+
+static void OpenGamepad(SDL_JoystickID which)
+{
+    if (sGamepad)
+        SDL_CloseGamepad(sGamepad);
+    sGamepad = SDL_OpenGamepad(which);
+    const char* name = SDL_GetGamepadNameForID(which);
+    LOG_INFO(Core, "Gamepad in use: {}", name ? name : "(unnamed)");
+}
+
 void SDLInput_GamepadAdded(SDL_JoystickID which)
 {
-    if (!sGamepad)
-        sGamepad = SDL_OpenGamepad(which);
+    if (!sGamepad || (IsVRGamepad(which) && !IsVRGamepad(SDL_GetGamepadID(sGamepad))))
+        OpenGamepad(which);
 }
 
 void SDLInput_GamepadRemoved(SDL_JoystickID which)
@@ -469,8 +489,12 @@ void ProcessJoystick_SDL()
         {
             int count = 0;
             SDL_JoystickID* ids = SDL_GetGamepads(&count);
+            int pick = 0;
+            for (int i = 0; ids && i < count; i++)
+                if (IsVRGamepad(ids[i]))
+                    pick = i;
             if (ids && count > 0)
-                sGamepad = SDL_OpenGamepad(ids[0]);
+                OpenGamepad(ids[pick]);
             SDL_free(ids);
         }
     }

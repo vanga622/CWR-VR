@@ -30,6 +30,8 @@
 #include <PoseidonVR/VRSession.hpp>
 
 #include <SDL3/SDL.h>
+
+#include <cstdlib>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -959,13 +961,29 @@ void EngineGL33::InitVR()
     s_mirror = cfg.IsVRMirror();
     Poseidon::Dev::DebugOverlay::SetExtraTab("VR", DrawVRTab);
     Poseidon::Dev::DebugOverlay::SetExtraOverlay(DrawVRStatus);
-    if (!vr.IsFake())
+    // Test aid (CWR_VR_DECOY_PAD=1): a silent pad attached before ours, as
+    // Virtual Desktop's gamepad emulation does, to check the game still
+    // reads the controllers.
+    if (std::getenv("CWR_VR_DECOY_PAD") && SDL_InitSubSystem(SDL_INIT_GAMEPAD))
     {
-        if (s_gamepad.Create())
-            LOG_INFO(Graphics, "VR: controllers attached as a virtual gamepad");
-        else
-            LOG_WARN(Graphics, "VR: virtual gamepad failed ({}), controllers unavailable", SDL_GetError());
+        SDL_VirtualJoystickDesc decoy;
+        SDL_INIT_INTERFACE(&decoy);
+        decoy.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+        decoy.naxes = SDL_GAMEPAD_AXIS_COUNT;
+        decoy.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+        decoy.name = "Decoy pad";
+        if (SDL_JoystickID id = SDL_AttachVirtualJoystick(&decoy))
+        {
+            SDL_OpenJoystick(id);
+            LOG_INFO(Graphics, "VR: decoy gamepad attached (test)");
+        }
     }
+    // Also with --vr-fake, so the scripted controllers reach the game the
+    // same way the real ones do.
+    if (s_gamepad.Create())
+        LOG_INFO(Graphics, "VR: controllers attached as a virtual gamepad");
+    else
+        LOG_WARN(Graphics, "VR: virtual gamepad failed ({}), controllers unavailable", SDL_GetError());
     // xrWaitFrame paces the loop from now on (see SetSwapInterval).
     if (!vr.IsFake())
         SDL_GL_SetSwapInterval(0);

@@ -354,6 +354,19 @@ void FillFakeFrame(StereoFrame& out)
         s_controllers.grip[0] = k->grip;
         s_controllers.b = k->b;
     }
+
+    // CWR_VR_FAKE_SCRIPT=movefire: every 12 s walk forward (0-3 s), fire
+    // (4-6 s), walk and fire together (7-10 s); checks the controller ->
+    // gamepad -> game path for movement and firing.
+    if (script && std::strcmp(script, "movefire") == 0)
+    {
+        const float t =
+            std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count(), 12.0f);
+        const bool walk = t < 3.0f || (t >= 7.0f && t < 10.0f);
+        const bool fire = (t >= 4.0f && t < 6.0f) || (t >= 7.0f && t < 10.0f);
+        s_controllers.moveY = walk ? 1.0f : 0.0f;
+        s_controllers.trigger[1] = fire ? 1.0f : 0.0f;
+    }
     for (int i = 0; i < 2; ++i)
     {
         s_aim[i] = out.aim[i];
