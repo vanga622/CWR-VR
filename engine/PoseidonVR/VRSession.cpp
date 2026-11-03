@@ -149,6 +149,10 @@ const ConfigKey kConfigKeys[] = {
     {"reload", "charge_up", &VRConfig::chargeUp, "charging handle above the weapon centre, metres"},
     {"reload", "charge_radius", &VRConfig::chargeRadius, "how close the left hand must be to grab it, metres"},
     {"reload", "charge_pull", &VRConfig::chargePull, "pull back this far to charge, metres"},
+    {"reload", "mag_forward", &VRConfig::magForward, "magazine in the left hand: ahead of the grip, metres"},
+    {"reload", "mag_down", &VRConfig::magDown, "magazine in the left hand: below the grip, metres"},
+    {"reload", "mag_pitch", &VRConfig::magPitch, "magazine in the left hand: forward tilt of its top, degrees (180 = upside down)"},
+    {"reload", "mag_scale", &VRConfig::magScale, "magazine in the left hand: model scale"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -317,10 +321,12 @@ void FillFakeFrame(StereoFrame& out)
     }
 
     // CWR_VR_FAKE_SCRIPT=reload: eject (B), left hand to the chest pouch and
-    // grab, to the magazine well under the weapon, let go.
+    // grab, hold the magazine up in front of the eyes, to the magazine well
+    // under the weapon, let go.  Repeats every 10 s (mission load time varies).
     if (script && std::strcmp(script, "reload") == 0)
     {
-        const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count();
+        const float t =
+            std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count(), 10.0f);
         struct Key
         {
             float time, x, y, z, grip;
@@ -331,8 +337,9 @@ void FillFakeFrame(StereoFrame& out)
             {2.0f, -0.02f, -0.30f, -0.62f, 0.0f, true},  // B: eject
             {2.5f, -0.05f, -0.50f, -0.20f, 0.0f, false}, // hand at the pouch
             {3.5f, -0.05f, -0.50f, -0.20f, 1.0f, false}, // grab
-            {4.5f, 0.06f, -0.36f, -0.50f, 1.0f, false},  // at the well: inserts
-            {5.5f, -0.02f, -0.30f, -0.62f, 0.0f, false}, // back, let go
+            {4.0f, -0.06f, -0.08f, -0.38f, 1.0f, false}, // magazine up in view
+            {7.0f, 0.06f, -0.36f, -0.50f, 1.0f, false},  // at the well: inserts
+            {8.0f, -0.02f, -0.30f, -0.62f, 0.0f, false}, // back, let go
         };
         const Key* k = &kKeys[0];
         for (const Key& key : kKeys)

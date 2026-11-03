@@ -632,8 +632,10 @@ void UpdateReload(const float headXr[3])
         {
             char line[160];
             std::snprintf(line, sizeof(line),
-                          "Reload: B ignored (manual %d, weapon tracked %d, soldier reported %d, UI %d, left hand %d)",
-                          cfg.manualReload >= 0.5f, s_weaponValid, s_magStateValid, s_uiInput, leftGrip.valid);
+                          "Reload: B ignored (manual %d, weapon tracked %d, soldier reported %d, UI %d (dialog %d, "
+                          "context %d), left hand %d)",
+                          cfg.manualReload >= 0.5f, s_weaponValid, s_magStateValid, s_uiInput, s_dialogOpen,
+                          static_cast<int>(Poseidon::InputSubsystem::Instance().GetContext()), leftGrip.valid);
             vr.LogLine(line);
         }
         s_magInHand = s_charging = false;
@@ -902,6 +904,10 @@ void DrawVRTab()
     ImGui::SliderFloat("Pouch ahead (m)", &c.pouchForward, 0.0f, 0.4f, "%.2f");
     ImGui::SliderFloat("Pouch right (m, - left)", &c.pouchRight, -0.4f, 0.4f, "%.2f");
     ImGui::SliderFloat("Charge pull (m)", &c.chargePull, 0.02f, 0.15f, "%.2f");
+    ImGui::SliderFloat("Magazine in hand ahead (m)", &c.magForward, -0.15f, 0.15f, "%.2f");
+    ImGui::SliderFloat("Magazine in hand below (m)", &c.magDown, -0.10f, 0.20f, "%.2f");
+    ImGui::SliderFloat("Magazine in hand tilt (deg)", &c.magPitch, -180.0f, 180.0f, "%.0f");
+    ImGui::SliderFloat("Magazine model scale", &c.magScale, 0.2f, 3.0f, "%.2f");
     ImGui::TextDisabled("Weapon: %s, %d spare, %s%s%s", s_magLoaded ? "magazine in" : "EMPTY", s_magSpares,
                         s_chambered ? "chambered" : "needs charge", s_magInHand ? ", magazine in hand" : "",
                         s_charging ? ", pulling handle" : "");
@@ -1129,6 +1135,24 @@ bool EngineGL33::VRHandPose(int hand, Matrix4& world) const
 float EngineGL33::VRForeEndForward() const
 {
     return PoseidonVR::VRSession::Instance().Config().foreEndForward;
+}
+
+bool EngineGL33::VRMagazineInHandPose(Matrix4& world) const
+{
+    Matrix4 hand;
+    if (!s_magInHand || !VRManualReload() || !VRHandPose(0, hand))
+        return false;
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    // The magazine models lie flat (long axis +Z, thin axis +Y): stand the
+    // long axis up in the hand, tipped forward by mag_pitch, thin side across.
+    const float pitch = cfg.magPitch * kDegToRad;
+    Matrix3 orient;
+    orient.SetDirectionAndUp(Vector3(0.0f, std::cos(pitch), std::sin(pitch)), Vector3(1.0f, 0.0f, 0.0f));
+    Matrix4 local = MIdentity;
+    local.SetOrientation(orient * Matrix3(MScale, cfg.magScale));
+    local.SetPosition(Vector3(0.0f, -cfg.magDown, cfg.magForward));
+    world = hand * local;
+    return true;
 }
 
 bool EngineGL33::VRWeaponPose(Matrix4& world, bool firing) const

@@ -268,7 +268,13 @@ class EngineGL33 : public Engine
                      const Poseidon::render::LegacySpec& spec) override;
 
     void Screenshot(RString filename) override { _pendingScreenshotPath = static_cast<const char*>(filename); }
-    void FlushPendingScreenshot() override { CaptureScreenshotIfPending(); }
+    // VR: under VR the window holds the eyes only right before the swap, so
+    // the capture waits for the next BackToFront instead of reading now.
+    void FlushPendingScreenshot() override
+    {
+        if (!_vrActive)
+            CaptureScreenshotIfPending();
+    }
     bool CanRestore() { return false; }
 
     void SwitchRenderMode(RenderMode mode)
@@ -615,6 +621,7 @@ class EngineGL33 : public Engine
     bool VRWeaponTwoHanded() const override;
     bool VRHandPose(int hand, Matrix4& world) const override;
     float VRForeEndForward() const override;
+    bool VRMagazineInHandPose(Matrix4& world) const override;
 
   protected:
 

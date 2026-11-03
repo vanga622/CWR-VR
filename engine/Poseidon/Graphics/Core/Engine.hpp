@@ -435,6 +435,9 @@ class Engine : public IGraphicsEngine
     // VR: where the animation's left hand holds the weapon (fore-end), metres
     // ahead of the weapon centre.
     virtual float VRForeEndForward() const { return 0.25f; }
+    // VR (M6): world pose (may carry a scale) of the magazine the left hand
+    // took from the pouch; false while the hand holds none.
+    virtual bool VRMagazineInHandPose(Matrix4& /*world*/) const { return false; }
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

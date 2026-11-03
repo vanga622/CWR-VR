@@ -70,6 +70,12 @@ struct VRConfig
     float chargeUp = 0.05f;
     float chargeRadius = 0.12f;
     float chargePull = 0.06f;    // pull back this far to charge
+    // Magazine drawn in the left hand (game model of the magazine), placed
+    // in the hand's frame (+Z = controller ray), metres and degrees.
+    float magForward = 0.02f;
+    float magDown = 0.0f;
+    float magPitch = 20.0f;      // forward tilt of the top; 180 turns it upside down
+    float magScale = 1.0f;
 };
 
 // Controller state from the OpenXR actions (Touch layout), refreshed every

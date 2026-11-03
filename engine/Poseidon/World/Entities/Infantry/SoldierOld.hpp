@@ -963,6 +963,9 @@ class Man: public Person
 	// state reported back.  A weapon fired or ejected empty needs its
 	// charging handle pulled after the new magazine (_vrChambered).
 	void VRReloadStep();
+	void VRDrawMagazineInHand( int level, float z2, const LightList &lights );
+	Ref<LODShapeWithShadow> _vrMagModel; // magazine drawn in the left hand
+	bool _vrMagModelAk = false;
 	bool _vrChambered = true;
 	const MagazineType *_vrLastMagType = nullptr;
 	// VR (M5): arm bones follow the weapon in the controller.

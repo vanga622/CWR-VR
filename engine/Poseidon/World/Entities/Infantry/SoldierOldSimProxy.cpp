@@ -421,7 +421,65 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         GEngine->SetPassKindHint(savedHint);
     }
 
+    VRDrawMagazineInHand(level, z2, lights); // VR (M6)
+
     _mGunFireFrames--;
+}
+
+// VR (M6): the magazine taken from the pouch is drawn in the left hand until
+// it goes into the well or back to the pouch.
+void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
+{
+    if (!GWorld || GWorld->CameraOn() != this || GWorld->GetCameraType() != CamInternal || IsDead() ||
+        _currentWeapon < 0)
+        return;
+    Matrix4 world;
+    if (!GEngine->VRMagazineInHandPose(world))
+        return;
+
+    // The type that goes in: the one ejected last, else what the weapon takes.
+    const MagazineType* type = _vrLastMagType;
+    const MuzzleType* muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
+    for (int i = 0; !type && muzzle && i < NMagazines(); i++)
+    {
+        const Magazine* magazine = GetMagazine(i);
+        if (magazine && muzzle->CanUse(magazine->_type))
+            type = magazine->_type;
+    }
+    if (!type)
+        return;
+
+    // The game data has two hand-sized magazine models that no config uses
+    // (CfgMagazines modelMagazine is the ammo pile shown on the ground):
+    // AK magazines get the curved one, everything else the straight one.
+    const bool ak = strnicmp(type->GetName(), "AK", 2) == 0;
+    if (!_vrMagModel || _vrMagModelAk != ak)
+    {
+        _vrMagModelAk = ak;
+        _vrMagModel = Shapes.New(ak ? "misc\\mag_ak.p3d" : "misc\\mag_nato.p3d", false, false);
+        LOG_INFO(Graphics, "VR: magazine in hand model {} for {}", ak ? "mag_AK" : "mag_NATO",
+                 static_cast<const char*>(type->GetName()));
+    }
+    LODShapeWithShadow* pshape = _vrMagModel;
+    if (!pshape)
+        return;
+
+    const Matrix4 invWorld = world.InverseScaled();
+    int pLevel = pshape->FindSpecLevel(VIEW_PILOT);
+    if (pLevel < 0)
+        pLevel = GScene->LevelFromDistance2(pshape, 0.25f, world.Scale(), world.Direction(),
+                                            GScene->GetCamera()->Direction());
+    if (pLevel == LOD_INVISIBLE)
+        pLevel = 0;
+    Shape* shape = pshape->LevelOpaque(pLevel);
+    if (!shape)
+        return;
+    const int shapeSpec = shape->Special() | NoDropdown | FogDisabled;
+    const render::PassKindHint savedHint = GEngine->GetPassKindHint();
+    GEngine->SetPassKindHint(render::PassKindHint::Cockpit);
+    shape->PrepareTextures(z2, shapeSpec);
+    shape->Draw(this, lights, ClipAll, shapeSpec, world, invWorld);
+    GEngine->SetPassKindHint(savedHint);
 }
 
 void Man::DrawNVOptics()
