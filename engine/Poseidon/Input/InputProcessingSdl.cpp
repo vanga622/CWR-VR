@@ -282,6 +282,22 @@ static bool IsVRGamepad(SDL_JoystickID id)
     return name && SDL_strcmp(name, "CWR-VR controllers") == 0;
 }
 
+// VR diagnostics (vr.log): what the game last read from the pad, and why
+// it read nothing.
+static float sDbgLx = 0, sDbgLy = 0, sDbgRt = 0;
+static const char* sDbgSkip = "not polled yet";
+
+void SDLInput_GamepadDebug(char* buf, int size)
+{
+    const char* name = sGamepad ? SDL_GetGamepadNameForID(SDL_GetGamepadID(sGamepad)) : nullptr;
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    SDL_free(ids);
+    SDL_snprintf(buf, size, "pad \"%s\" (%d pads), window focus %d, game read move %.2f %.2f fire %.2f%s%s",
+                 name ? name : "none", count, SDL_GetKeyboardFocus() != nullptr ? 1 : 0, sDbgLx, sDbgLy, sDbgRt,
+                 sDbgSkip ? ", skipped: " : "", sDbgSkip ? sDbgSkip : "");
+}
+
 static void OpenGamepad(SDL_JoystickID which)
 {
     if (sGamepad)
@@ -503,6 +519,7 @@ void ProcessJoystick_SDL()
     float syntheticLy = 0.0f;
     const bool hasSyntheticLeftStick = InputSubsystem::Instance().GetSyntheticLeftStick(syntheticLx, syntheticLy);
 
+    sDbgSkip = !sGamepad && !hasSyntheticLeftStick ? "no pad" : !GWorld->IsUserInputEnabled() ? "user input disabled" : nullptr;
     if ((!sGamepad && !hasSyntheticLeftStick) || !GWorld->IsUserInputEnabled())
     {
         sControllerEditorUiLayout.ResetDirections();
@@ -562,6 +579,9 @@ void ProcessJoystick_SDL()
     float rt = sGamepad ? SDL_GetGamepadAxis(sGamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 32767.0f : 0.0f;
     float lt = sGamepad ? SDL_GetGamepadAxis(sGamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0f : 0.0f;
     GInput.gamepad.stickAxis[2] = rt; // UAAxisThrust
+    sDbgLx = lx;
+    sDbgLy = ly;
+    sDbgRt = rt;
     GInput.gamepad.stickAxis[5] = lt; // UAAxisRudder
 
     // ---- Buttons [0..11] with edge detection ----

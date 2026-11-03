@@ -46,6 +46,11 @@ bool VRGamepad::Create()
 {
     if (_joystick)
         return true;
+    // SDL drops joystick axis and button changes while none of the app's
+    // windows has keyboard focus.  In the headset the desktop window rarely
+    // has it, so without this the left stick and the triggers never reached
+    // the game (B, grips and turning, read straight from OpenXR, still did).
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
         return false;
 

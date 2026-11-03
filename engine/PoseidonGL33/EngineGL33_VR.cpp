@@ -32,6 +32,8 @@
 #include <SDL3/SDL.h>
 
 #include <cstdlib>
+
+extern void SDLInput_GamepadDebug(char* buf, int size); // InputProcessingSdl.cpp
 #include <cfloat>
 #include <chrono>
 #include <cmath>
@@ -1391,6 +1393,23 @@ void EngineGL33::SubmitVRFrame()
     // the eject button in gameplay with manual reload, the gamepad's B in UI.
     const bool forwardB = s_uiInput || vr.Config().manualReload < 0.5f;
     s_gamepad.Update(vr.Controllers(), s_moveYaw, forwardB);
+    // Every 5 s: the controllers as OpenXR gives them and what the game read
+    // from the virtual pad (movement and firing go that way).
+    {
+        static auto s_nextInputLog = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= s_nextInputLog)
+        {
+            s_nextInputLog = now + std::chrono::seconds(5);
+            const PoseidonVR::ControllerState& c = vr.Controllers();
+            char game[256];
+            SDLInput_GamepadDebug(game, sizeof(game));
+            char line[400];
+            std::snprintf(line, sizeof(line), "Input: controllers move %.2f %.2f trigger %.2f (virtual pad %s, UI %d); %s",
+                          c.moveX, c.moveY, c.trigger[1], s_gamepad.IsCreated() ? "on" : "MISSING", s_uiInput, game);
+            vr.LogLine(line);
+        }
+    }
     if (_vrStereoFrame)
         SubmitVRStereoFrame();
     else if (!_vrFrameAttempted)
