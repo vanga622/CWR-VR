@@ -18,6 +18,9 @@ namespace Poseidon
 // VR (M6): the model that shows a magazine of this type in the hand and on
 // the ground; nullptr when the magazine is not reloaded by hand.
 LODShapeWithShadow *VRMagazineModel( const MagazineType *type );
+// VR (M6): the weapon model's own magazine as a hideable selection.
+bool VRPrepareWeaponMagazine( LODShapeWithShadow *weaponShape, const MagazineType *type );
+void VRShowWeaponMagazine( LODShapeWithShadow *weaponShape, int level, bool show );
 DEFINE_ENUM_BEG(MoveId)
 	MoveIdNone=-1
 DEFINE_ENUM_END(MoveId)

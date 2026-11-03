@@ -330,6 +330,30 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
             continue;
         }
 
+        // VR (M6): the player's weapon is drawn without its magazine while
+        // none is in (out in the hand, dropped or not yet inserted).
+        bool vrHideMagazine = false;
+        if (IsVRHeldWeaponProxy(level, proxy) && VRHandReloads(_currentWeapon))
+        {
+            static const void* s_prepared[32] = {};
+            bool prepared = false;
+            for (const void* p : s_prepared)
+                prepared = prepared || p == pshape;
+            if (!prepared)
+            {
+                for (const void*& p : s_prepared)
+                    if (!p)
+                    {
+                        p = pshape;
+                        break;
+                    }
+                const MuzzleType* muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
+                VRPrepareWeaponMagazine(pshape, muzzle && muzzle->_magazines.Size() > 0 ? muzzle->_magazines[0].GetRef()
+                                                                                       : nullptr);
+            }
+            vrHideMagazine = !GetMagazineSlot(_currentWeapon)._magazine;
+        }
+
         Matrix4 animTransform = AnimateProxyMatrix(level, proxy);
 
         Matrix4 pTransform = transform * animTransform;
@@ -416,8 +440,12 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         {
             GEngine->SetPassKindHint(render::PassKindHint::Cockpit);
         }
+        if (vrHideMagazine)
+            VRShowWeaponMagazine(pshape, pLevel, false);
         shape->PrepareTextures(z2, shapeSpec);
         shape->Draw(this, lights, ClipAll, shapeSpec, pTransform, invPTransform);
+        if (vrHideMagazine)
+            VRShowWeaponMagazine(pshape, pLevel, true);
         GEngine->SetPassKindHint(savedHint);
     }
 

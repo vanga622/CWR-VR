@@ -1,6 +1,7 @@
 #include <Poseidon/World/Entities/Infantry/SoldierOldCommon.hpp>
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Input/InputSubsystem.hpp>
+#include <algorithm>
 #include <limits.h>
 #include <utility>
 #include <Poseidon/Foundation/Common/FltOpts.hpp>
@@ -1055,6 +1056,194 @@ void Man::VRDropMagazine(const MagazineType* type)
     if (count >= VRDroppedMagazine::kMaxDropped && oldest)
         oldest->SetDelete();
     GWorld->AddCloudlet(new VRDroppedMagazine(shape, pose, velocity + Speed()));
+}
+
+// VR (M6): the weapon models have their magazine built into the mesh (no
+// named selection, no bone).  To show the weapon without its magazine the
+// magazine's faces are found by geometry (VRPrepareWeaponMagazine) and
+// given their own named selection with its own sections, which can then be
+// hidden like the muzzle flash.  The faces are grouped into pieces that
+// share vertex positions.
+namespace
+{
+struct MeshPiece
+{
+    AutoArray<int> faces; // face indices
+    Vector3 min, max;
+};
+
+void FindMeshPieces(const Shape* shape, AutoArray<MeshPiece>& pieces)
+{
+    // Weld vertices by position (1 mm), then union faces through shared ones.
+    const int nPos = shape->NPos();
+    AutoArray<int> weld;
+    weld.Resize(nPos);
+    for (int i = 0; i < nPos; i++)
+    {
+        weld[i] = i;
+        const Vector3 p = shape->Pos(i);
+        for (int j = 0; j < i; j++)
+        {
+            if ((shape->Pos(j) - p).SquareSize() < 1e-6f)
+            {
+                weld[i] = weld[j];
+                break;
+            }
+        }
+    }
+    AutoArray<int> parent;
+    parent.Resize(nPos);
+    for (int i = 0; i < nPos; i++)
+        parent[i] = i;
+    auto find = [&](int v)
+    {
+        while (parent[v] != v)
+            v = parent[v] = parent[parent[v]];
+        return v;
+    };
+    shape->BuildFaceIndexToOffset();
+    const int nFaces = shape->NFaces();
+    for (int f = 0; f < nFaces; f++)
+    {
+        const Poly& poly = shape->Face(shape->FaceIndexToOffset(f));
+        for (int k = 1; k < poly.N(); k++)
+        {
+            const int a = find(weld[poly.GetVertex(0)]);
+            const int b = find(weld[poly.GetVertex(k)]);
+            if (a != b)
+                parent[a] = b;
+        }
+    }
+    AutoArray<int> pieceOf;
+    pieceOf.Resize(nPos);
+    for (int i = 0; i < nPos; i++)
+        pieceOf[i] = -1;
+    for (int f = 0; f < nFaces; f++)
+    {
+        const Poly& poly = shape->Face(shape->FaceIndexToOffset(f));
+        if (poly.N() < 3 || (poly.Special() & (IsHidden | IsHiddenProxy)))
+            continue;
+        const int root = find(weld[poly.GetVertex(0)]);
+        if (pieceOf[root] < 0)
+        {
+            pieceOf[root] = pieces.Size();
+            MeshPiece& p = pieces.Append();
+            p.min = Vector3(1e10f, 1e10f, 1e10f);
+            p.max = Vector3(-1e10f, -1e10f, -1e10f);
+        }
+        MeshPiece& p = pieces[pieceOf[root]];
+        p.faces.Add(f);
+        for (int k = 0; k < poly.N(); k++)
+        {
+            const Vector3 v = shape->Pos(poly.GetVertex(k));
+            for (int a = 0; a < 3; a++)
+            {
+                p.min[a] = floatMin(p.min[a], v[a]);
+                p.max[a] = floatMax(p.max[a], v[a]);
+            }
+        }
+    }
+}
+} // namespace
+
+// VR (M6): finds the weapon's built-in magazine and makes it hideable.  The
+// magazine is the mesh piece whose size matches the magazine's own model
+// (sorted extents within 25 % or 1 cm), hanging below the model centre.
+// Each visual level where it is found gets a named selection "vr_magazine"
+// with its own sections; levels where it is merged with the receiver (or
+// drawn as a flat impostor) are logged and left alone.  Returns whether any
+// level has it.
+bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType* type)
+{
+    LODShapeWithShadow* magShape = VRMagazineModel(type);
+    if (!weaponShape || !magShape)
+        return false;
+    auto sortedSize = [](Vector3Par min, Vector3Par max)
+    {
+        float d[3] = {max.X() - min.X(), max.Y() - min.Y(), max.Z() - min.Z()};
+        std::sort(d, d + 3);
+        return Vector3(d[0], d[1], d[2]);
+    };
+    const Vector3 magSize = sortedSize(magShape->Min(), magShape->Max());
+    const VBType vbType = weaponShape->GetAllowAnimation() ? VBDynamic : VBStatic;
+    bool any = false;
+    for (int level = 0; level < weaponShape->NLevels(); level++)
+    {
+        const float res = weaponShape->Resolution(level);
+        Shape* lShape = weaponShape->Level(level);
+        if (!lShape || res > 5000.0f || lShape->FindNamedSel("vr_magazine") >= 0)
+        {
+            any = any || (lShape && lShape->FindNamedSel("vr_magazine") >= 0);
+            continue;
+        }
+        AutoArray<MeshPiece> pieces;
+        FindMeshPieces(lShape, pieces);
+        int pick = -1;
+        for (int i = 0; i < pieces.Size(); i++)
+        {
+            const MeshPiece& p = pieces[i];
+            const Vector3 size = sortedSize(p.min, p.max);
+            bool fits = p.max.Y() < 0.03f;
+            for (int a = 0; a < 3 && fits; a++)
+                fits = fabs(size[a] - magSize[a]) <= floatMax(0.25f * magSize[a], 0.01f);
+            if (fits && (pick < 0 || p.faces.Size() > pieces[pick].faces.Size()))
+                pick = i;
+        }
+        if (pick < 0)
+        {
+            LOG_INFO(Graphics, "VR: {} level {} (res {:.2f}): no separate magazine piece (stays visible)",
+                     static_cast<const char*>(weaponShape->GetName()), level, res);
+            continue;
+        }
+        const MeshPiece& p = pieces[pick];
+        AutoArray<VertexIndex> faces;
+        AutoArray<SelInfo> points;
+        AutoArray<bool> used;
+        used.Resize(lShape->NPos());
+        for (int i = 0; i < used.Size(); i++)
+            used[i] = false;
+        for (int fi = 0; fi < p.faces.Size(); fi++)
+        {
+            const int f = p.faces[fi];
+            faces.Add(static_cast<VertexIndex>(f));
+            const Poly& poly = lShape->Face(lShape->FaceIndexToOffset(f));
+            for (int k = 0; k < poly.N(); k++)
+                if (!used[poly.GetVertex(k)])
+                {
+                    used[poly.GetVertex(k)] = true;
+                    points.Add(SelInfo(poly.GetVertex(k), 255));
+                }
+        }
+        NamedSelection sel("vr_magazine", points.Data(), points.Size(), faces.Data(), faces.Size());
+        sel.SetNeedsSections(true);
+        lShape->ReleaseVBuffer();
+        lShape->AddNamedSel(sel);
+        lShape->FindSections();
+        lShape->ConvertToVBuffer(vbType);
+        const int index = lShape->FindNamedSel("vr_magazine");
+        LOG_INFO(Graphics, "VR: {} level {} (res {:.2f}): magazine = {} faces, {} sections, x {:.3f}..{:.3f} y {:.3f}..{:.3f}",
+                 static_cast<const char*>(weaponShape->GetName()), level, res, p.faces.Size(),
+                 index >= 0 ? lShape->NamedSel(index).NSections() : -1, p.min.X(), p.max.X(), p.min.Y(), p.max.Y());
+        any = true;
+    }
+    return any;
+}
+
+void VRShowWeaponMagazine(LODShapeWithShadow* weaponShape, int level, bool show)
+{
+    Shape* lShape = weaponShape ? weaponShape->Level(level) : nullptr;
+    const int index = lShape ? lShape->FindNamedSel("vr_magazine") : -1;
+    if (index < 0)
+        return;
+    const NamedSelection& sel = lShape->NamedSel(index);
+    for (int i = 0; i < sel.NSections(); i++)
+    {
+        ShapeSection& ss = lShape->GetSection(sel.GetSection(i));
+        if (show)
+            ss.properties.AndSpecial(~IsHidden);
+        else
+            ss.properties.OrSpecial(IsHidden);
+    }
 }
 
 // VR (M6): see SoldierOld.hpp; the gestures are in EngineGL33_VR.cpp.
