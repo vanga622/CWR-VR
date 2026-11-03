@@ -896,68 +896,294 @@ int Man::VRWantedStanceAction(int actPos) const
     return -1;
 }
 
+// VR (M6): how each magazine type feeds its weapon, and which model shows
+// the magazine.  The game data has only two hand-sized magazine models that
+// no config uses: misc\mag_nato.p3d (STANAG, M16/M4 texture) and
+// misc\mag_ak.p3d (AK).  Other detachable magazines get mag_nato as an
+// explicitly logged placeholder.  Anything not listed (belts, cylinders,
+// internal magazines, grenade and rocket launchers) is not reloaded by hand.
+namespace
+{
+struct VRMagazineFeed
+{
+    const char* magazine; // CfgWeapons magazine class
+    const char* model;    // model in the hand and on the ground
+    bool placeholder;     // the model is not this magazine's own shape
+};
+
+const VRMagazineFeed kVRMagazineFeeds[] = {
+    {"M16", "misc\\mag_nato.p3d", false},         {"M4", "misc\\mag_nato.p3d", false},
+    {"AK47", "misc\\mag_ak.p3d", false},          {"AK74", "misc\\mag_ak.p3d", false},
+    {"HK", "misc\\mag_nato.p3d", true},           {"M21", "misc\\mag_nato.p3d", true},
+    {"SVDDragunov", "misc\\mag_nato.p3d", true},  {"SteyrMag", "misc\\mag_nato.p3d", true},
+    {"G36aMag", "misc\\mag_nato.p3d", true},      {"FALMag", "misc\\mag_nato.p3d", true},
+    {"HKG3Mag", "misc\\mag_nato.p3d", true},      {"UZIMag", "misc\\mag_nato.p3d", true},
+    {"BizonMag", "misc\\mag_nato.p3d", true},     {"BerettaMag", "misc\\mag_nato.p3d", true},
+    {"CZ75Mag", "misc\\mag_nato.p3d", true},      {"GlockMag", "misc\\mag_nato.p3d", true},
+    {"GlockSMag", "misc\\mag_nato.p3d", true},    {"IngramMag", "misc\\mag_nato.p3d", true},
+    {"SkorpionMag", "misc\\mag_nato.p3d", true},  {"TokarevMag", "misc\\mag_nato.p3d", true},
+};
+
+const VRMagazineFeed* FindVRMagazineFeed(const MagazineType* type)
+{
+    if (!type)
+        return nullptr;
+    for (const VRMagazineFeed& f : kVRMagazineFeeds)
+        if (strcmpi(type->GetName(), f.magazine) == 0)
+            return &f;
+    return nullptr;
+}
+
+// A magazine let go or ejected: falls under gravity, tumbling a little,
+// and comes to rest lying flat on the topmost surface below it (terrain or a
+// building's floor).  Local and short-lived like cartridge cases (a world
+// cloudlet, not saved); at most kMaxDropped stay, each for kLifetime s.
+class VRDroppedMagazine : public Vehicle
+{
+    typedef Vehicle base;
+
+    Vector3 _velocity;
+    Vector3 _spin; // rad/s about the model axes
+    float _halfThickness;
+    float _age = 0.0f;
+    bool _resting = false;
+
+  public:
+    static constexpr int kMaxDropped = 12;
+    static constexpr float kLifetime = 90.0f;
+
+    VRDroppedMagazine(LODShapeWithShadow* shape, const Matrix4& pose, Vector3Par velocity)
+        : base(shape, VehicleTypes.New("FxCartridge"), -1), _velocity(velocity)
+    {
+        Matrix4 m = pose;
+        m.Orthogonalize();
+        SetTransform(m);
+        _halfThickness = shape ? floatMax(-shape->Min().Y(), 0.005f) : 0.012f;
+        _spin = Vector3(GRandGen.RandomValue() - 0.5f, GRandGen.RandomValue() - 0.5f, GRandGen.RandomValue() - 0.5f) * 6.0f;
+    }
+
+    bool MustBeSaved() const override { return false; }
+    float Age() const { return _age; }
+
+    void Simulate(float deltaT, SimulationImportance prec) override
+    {
+        _age += deltaT;
+        if (_age > kLifetime || !GLandscape)
+        {
+            SetDelete();
+            return;
+        }
+        if (_resting || deltaT <= 0)
+            return;
+
+        Matrix4 m = Transform();
+        Vector3 pos = m.Position();
+        // Topmost surface under the magazine before the move, so it lands on a
+        // floor it was above, not on the floor above it.
+        const float surface = GLandscape->RoadSurfaceYAboveWater(pos + VUp * 0.05f);
+        _velocity[1] -= G_CONST * deltaT;
+        pos += _velocity * deltaT;
+
+        m.SetOrientation(m.Orientation() * Matrix3(MRotationX, _spin.X() * deltaT) *
+                         Matrix3(MRotationY, _spin.Y() * deltaT) * Matrix3(MRotationZ, _spin.Z() * deltaT));
+
+        if (pos.Y() - _halfThickness <= surface)
+        {
+            // Rest flat (the model's thin axis up), keeping its heading.
+            Vector3 dir = m.Direction();
+            dir[1] = 0;
+            if (dir.SquareSize() < 1e-4f)
+                dir = m.DirectionAside().CrossProduct(VUp);
+            Matrix3 flat;
+            flat.SetDirectionAndUp(dir.Normalized(), VUp);
+            m.SetOrientation(flat);
+            pos[1] = surface + _halfThickness;
+            _velocity = VZero;
+            _resting = true;
+            LOG_INFO(Graphics, "VR: dropped magazine at rest after {:.2f} s on the surface at {:.2f} m (terrain {:.2f} m)",
+                     _age, surface, GLandscape->SurfaceYAboveWater(pos.X(), pos.Z()));
+        }
+        m.SetPosition(pos);
+        SetTransform(m);
+    }
+};
+} // namespace
+
+bool Man::VRHandReloads(int weapon) const
+{
+    if (weapon < 0 || weapon >= NMagazineSlots() || !GEngine->VRManualReload() ||
+        static_cast<const EntityAI*>(GWorld->PlayerOn()) != this)
+        return false;
+    const MuzzleType* muzzle = GetMagazineSlot(weapon)._muzzle;
+    return muzzle && muzzle->_magazines.Size() > 0 && FindVRMagazineFeed(muzzle->_magazines[0]) != nullptr;
+}
+
+LODShapeWithShadow* VRMagazineModel(const MagazineType* type)
+{
+    const VRMagazineFeed* feed = FindVRMagazineFeed(type);
+    if (!feed)
+        return nullptr;
+    static const MagazineType* s_logged = nullptr;
+    if (s_logged != type)
+    {
+        s_logged = type;
+        LOG_INFO(Graphics, "VR: magazine {} shown with {}{}", static_cast<const char*>(type->GetName()), feed->model,
+                 feed->placeholder ? " (PLACEHOLDER: no model of this magazine in the game data)" : "");
+    }
+    return Shapes.New(feed->model, false, false);
+}
+
+void Man::VRDropMagazine(const MagazineType* type)
+{
+    Matrix4 pose;
+    Vector3 velocity;
+    LODShapeWithShadow* shape = VRMagazineModel(type);
+    if (!shape || !GEngine->VRReloadEventPose(pose, velocity))
+        return;
+    // Keep the count bounded: the oldest dropped magazine goes first.
+    int count = 0;
+    VRDroppedMagazine* oldest = nullptr;
+    for (int i = 0; i < GWorld->NCloudlets(); i++)
+    {
+        auto* m = dynamic_cast<VRDroppedMagazine*>(GWorld->GetCloudlet(i));
+        if (!m || m->ToDelete())
+            continue;
+        ++count;
+        if (!oldest || m->Age() > oldest->Age())
+            oldest = m;
+    }
+    if (count >= VRDroppedMagazine::kMaxDropped && oldest)
+        oldest->SetDelete();
+    GWorld->AddCloudlet(new VRDroppedMagazine(shape, pose, velocity + Speed()));
+}
+
 // VR (M6): see SoldierOld.hpp; the gestures are in EngineGL33_VR.cpp.
 void Man::VRReloadStep()
 {
-    if (_currentWeapon < 0 || !GEngine->VRManualReload())
+    // The hand only holds a magazine of the weapon in use.
+    if (_currentWeapon < 0 || !VRHandReloads(_currentWeapon))
+    {
+        _vrHandMag = nullptr;
         return;
+    }
     MagazineSlot& current = _magazineSlots[_currentWeapon];
     const MuzzleType* muzzle = current._muzzle;
-    if (!muzzle)
-        return;
 
-    const int event = GEngine->VRTakeReloadEvent();
-    if (event != Engine::VRReloadNone)
-        LOG_INFO(Graphics, "VR: reload {} (magazine {}, ammo {})",
-                 event == Engine::VRReloadEject ? "eject" : event == Engine::VRReloadInsert ? "insert" : "charge",
-                 current._magazine ? "in" : "out", current._magazine ? static_cast<int>(current._magazine->_ammo) : 0);
-    switch (event)
+    // A magazine in the hand that left the inventory (scripts, death) is gone.
+    if (_vrHandMag)
     {
-        case Engine::VRReloadEject:
-            if (Magazine* magazine = current._magazine)
-            {
-                Foundation::GlobalShowMessage(1500, "Magazine out (%d rounds) - take one from the chest pouch",
-                                              static_cast<int>(magazine->_ammo));
-                _vrLastMagType = magazine->_type;
-                if (magazine->_ammo <= 0)
-                    _vrChambered = false;
-                for (int i = 0; i < _magazineSlots.Size(); i++)
-                    if (_magazineSlots[i]._muzzle == muzzle)
-                        _magazineSlots[i]._magazine = nullptr;
-                // A part-used magazine goes back to the pouch; an empty one is dropped.
-                if (magazine->_ammo <= 0)
-                    RemoveMagazine(magazine);
-            }
-            break;
-        case Engine::VRReloadInsert:
+        bool owned = false;
+        for (int i = 0; i < NMagazines(); i++)
+            owned = owned || GetMagazine(i) == _vrHandMag;
+        if (!owned)
+            _vrHandMag = nullptr;
+    }
+
+    auto clearSlots = [&](const Magazine* magazine)
+    {
+        for (int i = 0; i < _magazineSlots.Size(); i++)
+            if (_magazineSlots[i]._magazine == magazine)
+                _magazineSlots[i]._magazine = nullptr;
+    };
+
+    for (int event = GEngine->VRTakeReloadEvent(); event != Engine::VRReloadNone; event = GEngine->VRTakeReloadEvent())
+    {
+        Magazine* loaded = current._magazine;
+        switch (event)
         {
-            const int best = FindMagazineByType(muzzle, _vrLastMagType);
-            const bool loaded = best >= 0 && ReloadMagazineTimed(_currentWeapon, best, true);
-            if (loaded)
-                PlayReloadMagazineSound(_currentWeapon, muzzle);
-            LOG_INFO(Graphics, "VR: reload insert {} ({} rounds)", loaded ? "done" : "failed",
-                     loaded ? static_cast<int>(current._magazine->_ammo) : 0);
-            if (loaded)
-                Foundation::GlobalShowMessage(1500, _vrChambered ? "Magazine in (%d)" : "Magazine in (%d) - pull the charging handle",
-                                              static_cast<int>(current._magazine->_ammo));
-            break;
+            case Engine::VRReloadEject: // speed reload: the magazine falls, rounds and all
+                if (loaded)
+                {
+                    LOG_INFO(Graphics, "VR: reload eject, magazine {} with {} rounds dropped",
+                             static_cast<const char*>(loaded->_type->GetName()), static_cast<int>(loaded->_ammo));
+                    if (loaded->_ammo <= 0)
+                        _vrChambered = false; // fired dry: the bolt is locked back
+                    Ref<Magazine> keep = loaded;
+                    clearSlots(loaded);
+                    VRDropMagazine(loaded->_type);
+                    RemoveMagazine(loaded);
+                    Foundation::GlobalShowMessage(1500, "Magazine dropped (%d rounds)", static_cast<int>(keep->_ammo));
+                }
+                break;
+            case Engine::VRReloadUnload: // tactical: out into the hand, still ours
+                if (loaded)
+                {
+                    LOG_INFO(Graphics, "VR: reload unload, magazine with {} rounds in the hand",
+                             static_cast<int>(loaded->_ammo));
+                    if (loaded->_ammo <= 0)
+                        _vrChambered = false;
+                    _vrHandMag = loaded;
+                    clearSlots(loaded);
+                }
+                break;
+            case Engine::VRReloadTake: // the fullest spare from the pouch
+            {
+                Magazine* best = nullptr;
+                for (int i = 0; i < NMagazines(); i++)
+                {
+                    Magazine* m = GetMagazine(i);
+                    if (m && m != loaded && m->_ammo > 0 && muzzle->CanUse(m->_type) && (!best || m->_ammo > best->_ammo))
+                        best = m;
+                }
+                _vrHandMag = best;
+                LOG_INFO(Graphics, "VR: reload take, {} rounds", best ? static_cast<int>(best->_ammo) : -1);
+                break;
+            }
+            case Engine::VRReloadInsert:
+            {
+                int index = -1;
+                for (int i = 0; i < NMagazines(); i++)
+                    if (GetMagazine(i) == _vrHandMag)
+                        index = i;
+                const bool fits = index >= 0 && muzzle->CanUse(_vrHandMag->_type) && !current._magazine;
+                const bool done = fits && ReloadMagazineTimed(_currentWeapon, index, true);
+                if (done)
+                    PlayReloadMagazineSound(_currentWeapon, muzzle);
+                LOG_INFO(Graphics, "VR: reload insert {} ({} rounds)", done ? "done" : "refused",
+                         done ? static_cast<int>(current._magazine->_ammo) : 0);
+                if (done)
+                    Foundation::GlobalShowMessage(1500, _vrChambered ? "Magazine in (%d)"
+                                                                     : "Magazine in (%d) - pull the charging handle",
+                                                  static_cast<int>(current._magazine->_ammo));
+                _vrHandMag = nullptr;
+                break;
+            }
+            case Engine::VRReloadStow:
+                LOG_INFO(Graphics, "VR: reload stow ({} rounds back in the pouch)",
+                         _vrHandMag ? static_cast<int>(_vrHandMag->_ammo) : -1);
+                _vrHandMag = nullptr;
+                break;
+            case Engine::VRReloadDrop:
+                if (_vrHandMag)
+                {
+                    LOG_INFO(Graphics, "VR: reload drop, magazine with {} rounds falls",
+                             static_cast<int>(_vrHandMag->_ammo));
+                    Ref<Magazine> dropped = _vrHandMag;
+                    _vrHandMag = nullptr;
+                    clearSlots(dropped);
+                    VRDropMagazine(dropped->_type);
+                    RemoveMagazine(dropped);
+                }
+                break;
+            case Engine::VRReloadCharge:
+                _vrChambered = true;
+                LOG_INFO(Graphics, "VR: reload charge");
+                Foundation::GlobalShowMessage(1000, "Charged");
+                break;
+            default:
+                break;
         }
-        case Engine::VRReloadCharge:
-            _vrChambered = true;
-            Foundation::GlobalShowMessage(1000, "Charged");
-            break;
-        default:
-            break;
     }
 
     int spares = 0;
     for (int i = 0; i < NMagazines(); i++)
     {
         const Magazine* magazine = GetMagazine(i);
-        if (magazine && magazine != current._magazine && magazine->_ammo > 0 && muzzle->CanUse(magazine->_type))
+        if (magazine && magazine != current._magazine && magazine != _vrHandMag && magazine->_ammo > 0 &&
+            muzzle->CanUse(magazine->_type))
             ++spares;
     }
-    GEngine->VRSetMagazineState(current._magazine != nullptr, spares, _vrChambered);
+    GEngine->VRSetMagazineState(current._magazine != nullptr, spares, _vrChambered, _currentWeapon);
 }
 
 int Man::VRArmBones(BlendAnimInfo* out, bool leftArm) const

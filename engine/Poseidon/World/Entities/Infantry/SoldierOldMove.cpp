@@ -581,7 +581,7 @@ bool Man::ReloadMagazine(int slotIndex, int iMagazine)
 {
     // VR: with manual reload the player's hands do it (Man::VRReloadStep);
     // nothing else may slip a magazine in (Y still reloads, via PlayAction).
-    if (GEngine->VRManualReload() && static_cast<EntityAI*>(GWorld->PlayerOn()) == this)
+    if (VRHandReloads(slotIndex))
         return false;
 
     const MagazineSlot& slot = GetMagazineSlot(slotIndex);

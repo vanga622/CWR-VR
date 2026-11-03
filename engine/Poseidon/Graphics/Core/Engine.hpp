@@ -419,13 +419,22 @@ class Engine : public IGraphicsEngine
         VRReloadEject,  // B: drop the magazine out
         VRReloadInsert, // magazine from the pouch pushed into the well
         VRReloadCharge, // charging handle pulled back
+        VRReloadUnload, // left hand pulled the magazine out of the well (kept in hand)
+        VRReloadTake,   // left hand took a magazine from the pouch
+        VRReloadStow,   // magazine in hand let go at the pouch (or the hand was interrupted)
+        VRReloadDrop,   // magazine in hand let go elsewhere: it falls
     };
     // VR: World reports each frame whether a dialog is open (UI pointer on).
     virtual void VRSetDialogOpen(bool /*open*/) {}
 
     virtual bool VRManualReload() const { return false; }
-    virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/) {}
+    // weaponKey changes when the soldier switches weapon (a magazine in the
+    // hand goes back to the pouch).
+    virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/, int /*weaponKey*/) {}
     virtual int VRTakeReloadEvent() { return VRReloadNone; }
+    // VR: where the magazine of the event last taken was (world, magazine
+    // model axes: +Z its top, +Y across) and how fast it moved (m/s).
+    virtual bool VRReloadEventPose(Matrix4& /*world*/, Vector3& /*velocity*/) const { return false; }
     // VR: the left hand is on the weapon (two-handed hold) this frame.
     virtual bool VRWeaponTwoHanded() const { return false; }
     // VR: world pose of a tracked hand (0 left, 1 right): where it grips the

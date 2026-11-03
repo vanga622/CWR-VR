@@ -746,7 +746,7 @@ bool EntityAI::AutoReload(int weapon)
     //   AddWeapon ????
 
     // VR: the player reloads by hand (manual reload).
-    if (GEngine->VRManualReload() && static_cast<EntityAI*>(GWorld->PlayerOn()) == this)
+    if (VRHandReloads(weapon))
         return false;
 
     const MagazineSlot& slot = GetMagazineSlot(weapon);

@@ -355,6 +355,49 @@ void FillFakeFrame(StereoFrame& out)
         s_controllers.b = k->b;
     }
 
+    // CWR_VR_FAKE_SCRIPT=tactical: every 14 s pull the magazine out of the well
+    // by hand, hold it up, let it go to the side (it falls), take a new one
+    // from the pouch, insert it, let go.
+    if (script && std::strcmp(script, "tactical") == 0)
+    {
+        const float t =
+            std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count(), 14.0f);
+        struct Key
+        {
+            float time, x, y, z, grip;
+        };
+        static const Key kKeys[] = {
+            {0.0f, -0.20f, -0.35f, -0.40f, 0.0f},  // hand resting, away from the weapon
+            {1.0f, 0.06f, -0.36f, -0.50f, 0.0f},   // at the well
+            {1.5f, 0.06f, -0.36f, -0.50f, 1.0f},   // grip: magazine out into the hand
+            {2.5f, -0.06f, -0.08f, -0.38f, 1.0f},  // held up in view
+            {4.0f, -0.35f, -0.20f, -0.35f, 1.0f},  // out to the side
+            {4.5f, -0.35f, -0.20f, -0.35f, 0.0f},  // let go: it falls
+            {6.0f, -0.05f, -0.50f, -0.20f, 0.0f},  // at the pouch
+            {7.0f, -0.05f, -0.50f, -0.20f, 1.0f},  // take a magazine
+            {8.0f, 0.06f, -0.36f, -0.50f, 1.0f},   // at the well: inserts
+            {9.0f, -0.20f, -0.35f, -0.40f, 0.0f},  // let go, hand away
+        };
+        const Key* k = &kKeys[0];
+        for (const Key& key : kKeys)
+            if (t >= key.time)
+                k = &key;
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+        {
+            p->position[0] = k->x;
+            p->position[1] = k->y + headY;
+            p->position[2] = k->z;
+        }
+        s_controllers.grip[0] = k->grip;
+        // After the drop, look 55 degrees down at where it fell.
+        if (t >= 4.7f && t < 6.0f)
+            for (EyeView& e : out.eyes)
+            {
+                e.orientation[0] = -0.4617486f;
+                e.orientation[3] = 0.8870108f;
+            }
+    }
+
     // CWR_VR_FAKE_SCRIPT=movefire: every 12 s walk forward (0-3 s), fire
     // (4-6 s), walk and fire together (7-10 s); checks the controller ->
     // gamepad -> game path for movement and firing.

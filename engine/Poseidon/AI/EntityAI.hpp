@@ -948,6 +948,8 @@ public:
 
 	//! find and reload magazine
 	virtual bool ReloadMagazine(int slotIndex);
+	// VR (M6): the player reloads this weapon slot by hand (Man overrides).
+	virtual bool VRHandReloads(int /*weapon*/) const {return false;}
 	//! reload magazine implementation (hi level implementation)
 	virtual bool ReloadMagazine(int slotIndex, int iMagazine);
 

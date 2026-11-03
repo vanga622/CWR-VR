@@ -437,30 +437,11 @@ void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
     if (!GEngine->VRMagazineInHandPose(world))
         return;
 
-    // The type that goes in: the one ejected last, else what the weapon takes.
-    const MagazineType* type = _vrLastMagType;
-    const MuzzleType* muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
-    for (int i = 0; !type && muzzle && i < NMagazines(); i++)
-    {
-        const Magazine* magazine = GetMagazine(i);
-        if (magazine && muzzle->CanUse(magazine->_type))
-            type = magazine->_type;
-    }
-    if (!type)
+    // The very magazine the hand holds (Man::VRReloadStep), shown with its
+    // type's model (VRMagazineModel, SoldierOld.cpp).
+    if (!_vrHandMag)
         return;
-
-    // The game data has two hand-sized magazine models that no config uses
-    // (CfgMagazines modelMagazine is the ammo pile shown on the ground):
-    // AK magazines get the curved one, everything else the straight one.
-    const bool ak = strnicmp(type->GetName(), "AK", 2) == 0;
-    if (!_vrMagModel || _vrMagModelAk != ak)
-    {
-        _vrMagModelAk = ak;
-        _vrMagModel = Shapes.New(ak ? "misc\\mag_ak.p3d" : "misc\\mag_nato.p3d", false, false);
-        LOG_INFO(Graphics, "VR: magazine in hand model {} for {}", ak ? "mag_AK" : "mag_NATO",
-                 static_cast<const char*>(type->GetName()));
-    }
-    LODShapeWithShadow* pshape = _vrMagModel;
+    Ref<LODShapeWithShadow> pshape = VRMagazineModel(_vrHandMag->_type);
     if (!pshape)
         return;
 

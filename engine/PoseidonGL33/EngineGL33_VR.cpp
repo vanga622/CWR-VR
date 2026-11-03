@@ -243,13 +243,65 @@ bool s_magStateValid = false;
 bool s_magLoaded = true;
 int s_magSpares = 0;
 bool s_chambered = true;
-bool s_magInHand = false;   // left hand holds a magazine from the pouch
+bool s_magInHand = false;   // left hand holds a magazine (from the pouch or the well)
+bool s_insertArmed = true;  // the hand has been away from the well since it took the magazine
 bool s_charging = false;    // left hand holds the charging handle
 float s_chargeStart = 0.0f; // where along the barrel it was grabbed
 bool s_ejectHeld = false;
 bool s_leftGripHeld = false;
 bool s_pouchSetHeld = false;
-int s_reloadEvent = Engine::VRReloadNone;
+int s_weaponKey = -1;       // the soldier's weapon (VRSetMagazineState)
+// Events for the soldier, oldest first, each with where the magazine was.
+struct ReloadEvent
+{
+    int kind = Engine::VRReloadNone;
+    Matrix4 pose = MIdentity;
+    Vector3 velocity = VZero;
+};
+ReloadEvent s_events[4];
+int s_eventCount = 0;
+ReloadEvent s_lastEvent;
+// Left hand velocity (world, m/s), for a magazine let go in motion.
+Vector3 s_leftPrev = VZero;
+Vector3 s_leftVelocity = VZero;
+std::chrono::steady_clock::time_point s_leftPrevTime;
+
+void PushReloadEvent(int kind, const Matrix4& pose = MIdentity, const Vector3& velocity = VZero)
+{
+    if (s_eventCount == 4)
+    {
+        for (int i = 1; i < 4; ++i)
+            s_events[i - 1] = s_events[i];
+        --s_eventCount;
+    }
+    s_events[s_eventCount++] = ReloadEvent{kind, pose, velocity};
+}
+
+// The magazine models lie flat (long axis +Z, thin axis +Y).  In the hand
+// the long axis stands up, tipped forward by mag_pitch, thin side across.
+Matrix4 MagazineInHand(const Matrix4& hand, bool withScale)
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    const float pitch = cfg.magPitch * kDegToRad;
+    Matrix3 orient;
+    orient.SetDirectionAndUp(Vector3(0.0f, std::cos(pitch), std::sin(pitch)), Vector3(1.0f, 0.0f, 0.0f));
+    Matrix4 local = MIdentity;
+    local.SetOrientation(withScale ? orient * Matrix3(MScale, cfg.magScale) : orient);
+    local.SetPosition(Vector3(0.0f, -cfg.magDown, cfg.magForward));
+    return hand * local;
+}
+
+// The magazine in the well: top up into the weapon, thin side across.
+Matrix4 MagazineInWell(const Matrix4& weapon)
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    Matrix4 m = MIdentity;
+    Matrix3 orient;
+    orient.SetDirectionAndUp(weapon.DirectionUp(), weapon.DirectionAside());
+    m.SetOrientation(orient);
+    m.SetPosition(weapon.Position() + weapon.Direction() * cfg.wellForward - weapon.DirectionUp() * cfg.wellDown);
+    return m;
+}
 // Short-lived confirmation on the HUD ("Magazine out", "Charged", ...).
 const char* s_flashText = nullptr;
 std::chrono::steady_clock::time_point s_flashUntil;
@@ -587,7 +639,12 @@ void UpdateWeaponPose()
         const Vector3 centre = hand + orient.Direction() * cfg.weaponForward + orient.DirectionUp() * cfg.weaponUp +
                                orient.DirectionAside() * cfg.weaponRight;
         const Vector3 foreEnd = centre + orient.Direction() * cfg.foreEndForward;
-        s_foreGrip = (TrackedToWorld(support.position) - foreEnd).Size() < cfg.foreEndRadius;
+        // VR (M6): a grip nearer the magazine well than the fore-end is
+        // for the magazine (UpdateReload), not the fore-end.
+        const Vector3 well = centre + orient.Direction() * cfg.wellForward - orient.DirectionUp() * cfg.wellDown;
+        const Vector3 supportPos = TrackedToWorld(support.position);
+        s_foreGrip = (supportPos - foreEnd).Size() < cfg.foreEndRadius &&
+                     (supportPos - foreEnd).Size() < (supportPos - well).Size();
     }
     if (s_foreGrip)
     {
@@ -607,9 +664,12 @@ void UpdateWeaponPose()
 }
 
 // Manual reload (M6), as gestures with the left hand:
-//   B (right)            eject the magazine
+//   B (right)            eject the magazine: it drops and falls (speed reload)
+//   grip at the well     pull the magazine out into the hand (tactical reload)
 //   grip at the pouch    take a magazine (only with the weapon empty and a
-//                        spare left); releasing it elsewhere puts it back
+//                        spare left)
+//   let go at the pouch  put the magazine in the hand back
+//   let go elsewhere     drop it: it falls
 //   bring it to the well insert it
 //   grip at the handle   and pull back along the barrel: chamber a round
 //                        (needed when the weapon was fired empty)
@@ -640,6 +700,11 @@ void UpdateReload(const float headXr[3])
                           static_cast<int>(Poseidon::InputSubsystem::Instance().GetContext()), leftGrip.valid);
             vr.LogLine(line);
         }
+        if (s_magInHand)
+        {
+            PushReloadEvent(Engine::VRReloadStow); // interrupted: the magazine stays in the pouch
+            vr.LogLine("Reload: hand interrupted, magazine back in the pouch");
+        }
         s_magInHand = s_charging = false;
         s_magStateValid = false;
         return;
@@ -647,11 +712,27 @@ void UpdateReload(const float headXr[3])
     const Vector3 left = TrackedToWorld(leftGrip.position);
     const Matrix4& weapon = s_weaponWorld;
 
+    // Left hand velocity, smoothed, for a magazine let go while moving.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const float dt = std::chrono::duration<float>(now - s_leftPrevTime).count();
+        if (dt > 0.001f && dt < 0.2f)
+            s_leftVelocity = s_leftVelocity * 0.5f + (left - s_leftPrev) * (0.5f / dt);
+        else
+            s_leftVelocity = VZero;
+        s_leftPrev = left;
+        s_leftPrevTime = now;
+    }
+    Matrix4 leftHand;
+    leftHand.SetOrientation(s_bodyYaw * ToEngineOrientation(s_frame.aim[0].orientation));
+    leftHand.SetPosition(left);
+    const Vector3 well = weapon.Position() + weapon.Direction() * cfg.wellForward - weapon.DirectionUp() * cfg.wellDown;
+
     if (ejectPress)
     {
-        if (s_magLoaded)
+        if (s_magLoaded && !s_magInHand)
         {
-            s_reloadEvent = Engine::VRReloadEject;
+            PushReloadEvent(Engine::VRReloadEject, MagazineInWell(weapon), weapon.DirectionUp() * -1.0f);
             vr.Haptic(1, 0.5f, 0.05f);
             Flash("Magazine out");
         }
@@ -682,13 +763,25 @@ void UpdateReload(const float headXr[3])
                       edit.pouchForward, edit.pouchRight, edit.pouchDown);
         vr.LogLine(line);
     }
-    if (!s_magInHand && gripPress && !s_magLoaded)
+    // Grip at the well with a magazine in: pull it out into the hand.
+    if (!s_magInHand && !s_charging && !s_foreGrip && gripPress && s_magLoaded && (left - well).Size() < cfg.wellRadius)
+    {
+        s_magInHand = true;
+        s_insertArmed = false; // must leave the well before it can go back in
+        PushReloadEvent(Engine::VRReloadUnload);
+        vr.Haptic(0, 0.6f, 0.06f);
+        Flash("Magazine out (in hand)");
+        vr.LogLine("Reload: magazine pulled out by hand");
+    }
+    else if (!s_magInHand && gripPress && !s_magLoaded)
     {
         const float dist = (left - pouch).Size();
         char line[128];
         if (s_magSpares > 0 && dist < cfg.pouchRadius)
         {
             s_magInHand = true;
+            s_insertArmed = true;
+            PushReloadEvent(Engine::VRReloadTake);
             vr.Haptic(0, 0.6f, 0.06f);
             Flash("Magazine taken");
             std::snprintf(line, sizeof(line), "Reload: magazine taken from the pouch (%.2f m from it)", dist);
@@ -703,11 +796,11 @@ void UpdateReload(const float headXr[3])
 
     if (s_magInHand)
     {
-        const Vector3 well =
-            weapon.Position() + weapon.Direction() * cfg.wellForward - weapon.DirectionUp() * cfg.wellDown;
-        if ((left - well).Size() < cfg.wellRadius)
+        if (!s_insertArmed && (left - well).Size() > cfg.wellRadius * 1.5f)
+            s_insertArmed = true;
+        if (s_insertArmed && !s_magLoaded && (left - well).Size() < cfg.wellRadius)
         {
-            s_reloadEvent = Engine::VRReloadInsert;
+            PushReloadEvent(Engine::VRReloadInsert);
             s_magInHand = false;
             vr.Haptic(0, 0.8f, 0.08f);
             vr.Haptic(1, 0.5f, 0.06f);
@@ -716,10 +809,24 @@ void UpdateReload(const float headXr[3])
         }
         else if (!gripNow)
         {
-            s_magInHand = false; // let go away from the weapon: back to the pouch
-            char line[96];
-            std::snprintf(line, sizeof(line), "Reload: magazine let go %.2f m from the well (radius %.2f)",
-                          (left - well).Size(), cfg.wellRadius);
+            // Let go: at the pouch it goes back in, anywhere else it falls.
+            s_magInHand = false;
+            const float toPouch = (left - pouch).Size();
+            char line[128];
+            if (toPouch < cfg.pouchRadius)
+            {
+                PushReloadEvent(Engine::VRReloadStow);
+                vr.Haptic(0, 0.4f, 0.04f);
+                Flash("Magazine in the pouch");
+                std::snprintf(line, sizeof(line), "Reload: magazine back in the pouch (%.2f m from it)", toPouch);
+            }
+            else
+            {
+                PushReloadEvent(Engine::VRReloadDrop, MagazineInHand(leftHand, false), s_leftVelocity);
+                Flash("Magazine dropped");
+                std::snprintf(line, sizeof(line), "Reload: magazine dropped %.2f m from the pouch, %.2f m from the well",
+                              toPouch, (left - well).Size());
+            }
             vr.LogLine(line);
         }
     }
@@ -743,7 +850,7 @@ void UpdateReload(const float headXr[3])
             }
             else if (s_chargeStart - along > cfg.chargePull)
             {
-                s_reloadEvent = Engine::VRReloadCharge;
+                PushReloadEvent(Engine::VRReloadCharge);
                 s_charging = false;
                 vr.Haptic(0, 0.9f, 0.08f);
                 vr.Haptic(1, 0.5f, 0.05f);
@@ -1160,16 +1267,7 @@ bool EngineGL33::VRMagazineInHandPose(Matrix4& world) const
     Matrix4 hand;
     if (!s_magInHand || !VRManualReload() || !VRHandPose(0, hand))
         return false;
-    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
-    // The magazine models lie flat (long axis +Z, thin axis +Y): stand the
-    // long axis up in the hand, tipped forward by mag_pitch, thin side across.
-    const float pitch = cfg.magPitch * kDegToRad;
-    Matrix3 orient;
-    orient.SetDirectionAndUp(Vector3(0.0f, std::cos(pitch), std::sin(pitch)), Vector3(1.0f, 0.0f, 0.0f));
-    Matrix4 local = MIdentity;
-    local.SetOrientation(orient * Matrix3(MScale, cfg.magScale));
-    local.SetPosition(Vector3(0.0f, -cfg.magDown, cfg.magForward));
-    world = hand * local;
+    world = MagazineInHand(hand, true);
     return true;
 }
 
@@ -1213,8 +1311,19 @@ bool EngineGL33::VRManualReload() const
     return _vrActive && s_weaponValid && PoseidonVR::VRSession::Instance().Config().manualReload >= 0.5f;
 }
 
-void EngineGL33::VRSetMagazineState(bool loaded, int spares, bool chambered)
+void EngineGL33::VRSetMagazineState(bool loaded, int spares, bool chambered, int weaponKey)
 {
+    if (weaponKey != s_weaponKey)
+    {
+        // Weapon switched: a magazine in the hand goes back to the pouch.
+        if (s_magInHand)
+        {
+            PushReloadEvent(VRReloadStow);
+            PoseidonVR::VRSession::Instance().LogLine("Reload: weapon switched, magazine back in the pouch");
+        }
+        s_magInHand = s_charging = false;
+        s_weaponKey = weaponKey;
+    }
     s_magStateValid = true;
     s_magLoaded = loaded;
     s_magSpares = spares;
@@ -1223,9 +1332,22 @@ void EngineGL33::VRSetMagazineState(bool loaded, int spares, bool chambered)
 
 int EngineGL33::VRTakeReloadEvent()
 {
-    const int ev = s_reloadEvent;
-    s_reloadEvent = VRReloadNone;
-    return ev;
+    if (s_eventCount == 0)
+        return VRReloadNone;
+    s_lastEvent = s_events[0];
+    for (int i = 1; i < s_eventCount; ++i)
+        s_events[i - 1] = s_events[i];
+    --s_eventCount;
+    return s_lastEvent.kind;
+}
+
+bool EngineGL33::VRReloadEventPose(Matrix4& world, Vector3& velocity) const
+{
+    if (s_lastEvent.kind != VRReloadEject && s_lastEvent.kind != VRReloadDrop)
+        return false;
+    world = s_lastEvent.pose;
+    velocity = s_lastEvent.velocity;
+    return true;
 }
 
 void EngineGL33::VRSetPlayerBody(const void* id, const Matrix3& orientation, bool soldier, float groundY)

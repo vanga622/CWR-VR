@@ -15,6 +15,9 @@
 
 namespace Poseidon
 {
+// VR (M6): the model that shows a magazine of this type in the hand and on
+// the ground; nullptr when the magazine is not reloaded by hand.
+LODShapeWithShadow *VRMagazineModel( const MagazineType *type );
 DEFINE_ENUM_BEG(MoveId)
 	MoveIdNone=-1
 DEFINE_ENUM_END(MoveId)
@@ -964,10 +967,14 @@ class Man: public Person
 	// charging handle pulled after the new magazine (_vrChambered).
 	void VRReloadStep();
 	void VRDrawMagazineInHand( int level, float z2, const LightList &lights );
-	Ref<LODShapeWithShadow> _vrMagModel; // magazine drawn in the left hand
-	bool _vrMagModelAk = false;
+	// VR (M6): true when the player's weapon in this slot is reloaded by hand
+	// (a detachable box magazine); other feeds keep the game's reload.
+	bool VRHandReloads( int weapon ) const override;
+	// VR (M6): spawns the magazine falling from where the last event left it.
+	void VRDropMagazine( const MagazineType *type );
+	Ref<Magazine> _vrHandMag; // the magazine in the left hand (still in _magazines)
+	int _vrReportedWeapon = -1;
 	bool _vrChambered = true;
-	const MagazineType *_vrLastMagType = nullptr;
 	// VR (M5): arm bones follow the weapon in the controller.
 	bool VRArmsTransform( Matrix4 &right, Matrix4 &left ) const;
 	int VRArmBones( BlendAnimInfo *out, bool leftArm ) const;

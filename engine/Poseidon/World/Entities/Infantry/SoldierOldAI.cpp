@@ -803,7 +803,7 @@ bool Soldier::FireWeapon(int weapon, TargetType* target)
     }
     // VR: after a magazine went in empty, nothing fires until the charging
     // handle is pulled (manual reload).
-    if (!_vrChambered && GEngine->VRManualReload() && static_cast<EntityAI*>(GWorld->PlayerOn()) == this)
+    if (!_vrChambered && VRHandReloads(weapon))
     {
         PlayEmptyMagazineSound(weapon);
         return false;
