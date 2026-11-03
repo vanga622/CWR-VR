@@ -64,6 +64,7 @@ extern void SDLGamepad_PlayRamp(float beg, float end, float dur);
 #include <Poseidon/UI/Controls/UIControls.hpp>
 #include <Poseidon/UI/Map/UIMap.hpp>
 #include <Poseidon/UI/Map/UIMapCommon.hpp>
+#include <Poseidon/UI/UIActiveDisplay.hpp> // VR: dialog detection
 
 #include <Poseidon/IO/Streams/QBStream.hpp>
 #include <Poseidon/IO/Serialization/ParamArchive.hpp>
@@ -1271,8 +1272,16 @@ void World::Simulate(float deltaT, bool& enableDraw)
     bool clear = true;
 
     // VR: any dialog up (pause and mission-end/death screens, briefing,
-    // map, warnings) makes the right controller a mouse pointer.
-    GEngine->VRSetDialogOpen(_warningMessage || _options || _userDlg || (_map && _showMap));
+    // map, warnings) makes the right controller a mouse pointer.  The main
+    // menu stays in _options for the whole session with the mission display
+    // as its deepest child, so _options counts only when something else is
+    // open on top of the mission (or no mission is running).
+    {
+        bool optionsDialog = false;
+        if (_options)
+            optionsDialog = !dynamic_cast<DisplayMission*>(UIActiveDisplay::WalkToDeepest(_options));
+        GEngine->VRSetDialogOpen(_warningMessage || optionsDialog || _userDlg || (_map && _showMap));
+    }
 
     if (_warningMessage)
     {
