@@ -617,6 +617,9 @@ class EngineGL33 : public Engine
     bool VRManualReload() const override;
     void VRSetDialogOpen(bool open) override;
     void VRSetMagazineState(bool loaded, int spares, bool chambered, int weaponKey) override;
+    bool VRChargeEveryMagazine() const override;
+    void VRSetChargeHandle(Vector3Par world, float travel) override;
+    float VRChargePull() const override;
     int VRTakeReloadEvent() override;
     bool VRReloadEventPose(Matrix4& world, Vector3& velocity) const override;
     bool VRWeaponTwoHanded() const override;

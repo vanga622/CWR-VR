@@ -333,20 +333,12 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         // VR (M6): the player's weapon is drawn without its magazine while
         // none is in (out in the hand, dropped or not yet inserted).
         bool vrHideMagazine = false;
+        bool vrHeldWeapon = false;
         if (IsVRHeldWeaponProxy(level, proxy) && VRHandReloads(_currentWeapon))
         {
-            static const void* s_prepared[32] = {};
-            bool prepared = false;
-            for (const void* p : s_prepared)
-                prepared = prepared || p == pshape;
-            if (!prepared)
+            vrHeldWeapon = true;
+            if (VRWeaponNeedsPreparing(pshape))
             {
-                for (const void*& p : s_prepared)
-                    if (!p)
-                    {
-                        p = pshape;
-                        break;
-                    }
                 const MuzzleType* muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
                 VRPrepareWeaponMagazine(pshape, muzzle && muzzle->_magazines.Size() > 0 ? muzzle->_magazines[0].GetRef()
                                                                                        : nullptr);
@@ -442,10 +434,25 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         }
         if (vrHideMagazine)
             VRShowWeaponMagazine(pshape, pLevel, false);
+        // VR (M6): the charging handle: its place goes to the hand gesture,
+        // and while pulled it is drawn apart, moved back along the weapon.
+        Vector3 vrBoltCentre;
+        float vrBoltTravel = 0.0f;
+        const bool vrBolt = vrHeldWeapon && VRWeaponBolt(pshape, pLevel, vrBoltCentre, vrBoltTravel);
+        const float vrBoltBack = vrBolt ? GEngine->VRChargePull() * vrBoltTravel : 0.0f;
+        if (vrBolt)
+            GEngine->VRSetChargeHandle(pTransform.FastTransform(vrBoltCentre), vrBoltTravel);
+        if (vrBoltBack > 0.0f)
+            VRShowWeaponMagazine(pshape, pLevel, false, "vr_bolt");
         shape->PrepareTextures(z2, shapeSpec);
         shape->Draw(this, lights, ClipAll, shapeSpec, pTransform, invPTransform);
         if (vrHideMagazine)
             VRShowWeaponMagazine(pshape, pLevel, true);
+        if (vrBoltBack > 0.0f)
+        {
+            VRShowWeaponMagazine(pshape, pLevel, true, "vr_bolt");
+            VRDrawWeaponBolt(this, pshape, pLevel, pTransform, vrBoltBack, z2, lights);
+        }
         GEngine->SetPassKindHint(savedHint);
     }
 
@@ -465,10 +472,21 @@ void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
     if (!GEngine->VRMagazineInHandPose(world))
         return;
 
-    // The very magazine the hand holds (Man::VRReloadStep), shown with its
-    // type's model (VRMagazineModel, SoldierOld.cpp).
+    // The very magazine the hand holds (Man::VRReloadStep): the magazine
+    // piece of the weapon's own model (its texture), else the stand-in
+    // model (VRMagazineModel, SoldierOld.cpp).
     if (!_vrHandMag)
         return;
+    const WeaponType* weapon = GetMagazineSlot(_currentWeapon)._weapon;
+    if (weapon && weapon->_model)
+    {
+        const render::PassKindHint hint = GEngine->GetPassKindHint();
+        GEngine->SetPassKindHint(render::PassKindHint::Cockpit);
+        const bool drawn = VRDrawWeaponMagazine(this, weapon->_model, world, z2, lights);
+        GEngine->SetPassKindHint(hint);
+        if (drawn)
+            return;
+    }
     Ref<LODShapeWithShadow> pshape = VRMagazineModel(_vrHandMag->_type);
     if (!pshape)
         return;

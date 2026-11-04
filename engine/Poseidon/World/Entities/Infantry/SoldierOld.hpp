@@ -20,7 +20,17 @@ namespace Poseidon
 LODShapeWithShadow *VRMagazineModel( const MagazineType *type );
 // VR (M6): the weapon model's own magazine as a hideable selection.
 bool VRPrepareWeaponMagazine( LODShapeWithShadow *weaponShape, const MagazineType *type );
-void VRShowWeaponMagazine( LODShapeWithShadow *weaponShape, int level, bool show );
+void VRShowWeaponMagazine( LODShapeWithShadow *weaponShape, int level, bool show, const char *selection = "vr_magazine" );
+// VR (M6): draws only the weapon model's magazine piece at a magazine frame
+// (z its top, y across); false when the model has none known.
+bool VRDrawWeaponMagazine( Object *owner, LODShapeWithShadow *weapon, const Matrix4 &magFrame, float z2, const LightList &lights );
+bool VRHasWeaponMagazine( const LODShapeWithShadow *weapon );
+bool VRWeaponNeedsPreparing( const LODShapeWithShadow *weapon );
+// VR (M6): the weapon model's charging handle on this level (centre in model
+// space, travel in metres); false when the level has none.  VRDrawWeaponBolt
+// draws only the handle, moved back that far along the weapon.
+bool VRWeaponBolt( const LODShapeWithShadow *weapon, int level, Vector3 &centre, float &travel );
+void VRDrawWeaponBolt( Object *owner, LODShapeWithShadow *weapon, int level, const Matrix4 &weaponFrame, float back, float z2, const LightList &lights );
 DEFINE_ENUM_BEG(MoveId)
 	MoveIdNone=-1
 DEFINE_ENUM_END(MoveId)
@@ -966,8 +976,8 @@ class Man: public Person
 	// VR (M5): stance from the player's real head height; -1 = keep.
 	int VRWantedStanceAction( int actPos ) const;
 	// VR (M6): manual reload events from the controllers, and the weapon
-	// state reported back.  A weapon fired or ejected empty needs its
-	// charging handle pulled after the new magazine (_vrChambered).
+	// state reported back.  A new magazine needs the charging handle pulled
+	// (charge_every_magazine; else only after firing dry) (_vrChambered).
 	void VRReloadStep();
 	void VRDrawMagazineInHand( int level, float z2, const LightList &lights );
 	// VR (M6): true when the player's weapon in this slot is reloaded by hand

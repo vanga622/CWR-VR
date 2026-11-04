@@ -69,7 +69,8 @@ struct VRConfig
     float chargeBack = 0.20f;    // charging handle: behind the weapon centre
     float chargeUp = 0.05f;
     float chargeRadius = 0.12f;
-    float chargePull = 0.06f;    // pull back this far to charge
+    float chargePull = 0.06f;    // pull back this far to charge (weapons with no handle of their own)
+    float chargeEveryMagazine = 1.0f; // 1 = every magazine needs the handle, 0 = only after firing dry
     // Magazine drawn in the left hand (game model of the magazine), placed
     // in the hand's frame (+Z = controller ray), metres and degrees.
     float magForward = 0.02f;

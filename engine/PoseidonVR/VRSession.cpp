@@ -148,7 +148,8 @@ const ConfigKey kConfigKeys[] = {
     {"reload", "charge_back", &VRConfig::chargeBack, "charging handle behind the weapon centre, metres"},
     {"reload", "charge_up", &VRConfig::chargeUp, "charging handle above the weapon centre, metres"},
     {"reload", "charge_radius", &VRConfig::chargeRadius, "how close the left hand must be to grab it, metres"},
-    {"reload", "charge_pull", &VRConfig::chargePull, "pull back this far to charge, metres"},
+    {"reload", "charge_pull", &VRConfig::chargePull, "pull back this far to charge, weapons with no moving handle, metres"},
+    {"reload", "charge_every_magazine", &VRConfig::chargeEveryMagazine, "1 = every magazine needs the charging handle, 0 = only after firing dry"},
     {"reload", "mag_forward", &VRConfig::magForward, "magazine in the left hand: ahead of the grip, metres"},
     {"reload", "mag_down", &VRConfig::magDown, "magazine in the left hand: below the grip, metres"},
     {"reload", "mag_pitch", &VRConfig::magPitch, "magazine in the left hand: forward tilt of its top, degrees (180 = upside down)"},
@@ -353,6 +354,47 @@ void FillFakeFrame(StereoFrame& out)
         }
         s_controllers.grip[0] = k->grip;
         s_controllers.b = k->b;
+    }
+
+    // CWR_VR_FAKE_SCRIPT=charge: every 16 s pull the magazine out by hand, let
+    // it fall, take one from the pouch, insert it, then left hand to the
+    // charging handle (of an M16 held by the fake right hand), pull it back,
+    // hold, let go.  No B press: B would leave the mission dialogs.
+    if (script && std::strcmp(script, "charge") == 0)
+    {
+        const float t =
+            std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count(), 16.0f);
+        struct Key
+        {
+            float time, x, y, z, grip;
+        };
+        static const Key kKeys[] = {
+            {0.0f, -0.20f, -0.35f, -0.40f, 0.0f},  // hand resting, away from the weapon
+            {1.0f, 0.06f, -0.36f, -0.50f, 0.0f},   // at the well
+            {1.5f, 0.06f, -0.36f, -0.50f, 1.0f},   // grip: magazine out into the hand
+            {2.5f, -0.35f, -0.20f, -0.35f, 1.0f},  // out to the side
+            {3.0f, -0.35f, -0.20f, -0.35f, 0.0f},  // let go: it falls
+            {3.5f, -0.05f, -0.50f, -0.20f, 0.0f},  // at the pouch
+            {4.5f, -0.05f, -0.50f, -0.20f, 1.0f},  // take a magazine
+            {5.5f, 0.06f, -0.36f, -0.50f, 1.0f},   // at the well: inserts
+            {6.5f, 0.06f, -0.20f, -0.33f, 0.0f},   // at the handle, relaxed
+            {7.5f, 0.06f, -0.20f, -0.33f, 1.0f},   // grip the handle
+            {8.0f, 0.06f, -0.20f, -0.295f, 1.0f},  // half way back
+            {9.0f, 0.06f, -0.20f, -0.25f, 1.0f},   // fully back
+            {11.0f, 0.06f, -0.20f, -0.25f, 0.0f},  // let go: it snaps forward
+            {13.0f, -0.20f, -0.35f, -0.40f, 0.0f},
+        };
+        const Key* k = &kKeys[0];
+        for (const Key& key : kKeys)
+            if (t >= key.time)
+                k = &key;
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+        {
+            p->position[0] = k->x;
+            p->position[1] = k->y + headY;
+            p->position[2] = k->z;
+        }
+        s_controllers.grip[0] = k->grip;
     }
 
     // CWR_VR_FAKE_SCRIPT=tactical: every 14 s pull the magazine out of the well

@@ -418,7 +418,7 @@ class Engine : public IGraphicsEngine
         VRReloadNone,
         VRReloadEject,  // B: drop the magazine out
         VRReloadInsert, // magazine from the pouch pushed into the well
-        VRReloadCharge, // charging handle pulled back
+        VRReloadCharge, // charging handle pulled fully back and gone forward again
         VRReloadUnload, // left hand pulled the magazine out of the well (kept in hand)
         VRReloadTake,   // left hand took a magazine from the pouch
         VRReloadStow,   // magazine in hand let go at the pouch (or the hand was interrupted)
@@ -432,6 +432,14 @@ class Engine : public IGraphicsEngine
     // hand goes back to the pouch).
     virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/, int /*weaponKey*/) {}
     virtual int VRTakeReloadEvent() { return VRReloadNone; }
+    // VR: every magazine put in needs the charging handle (else only a weapon
+    // fired dry).
+    virtual bool VRChargeEveryMagazine() const { return false; }
+    // VR: where the weapon drawn this frame has its charging handle (world)
+    // and how far it travels, metres.
+    virtual void VRSetChargeHandle(Vector3Par /*world*/, float /*travel*/) {}
+    // VR: how far the charging handle is back, 0 (forward) to 1 (fully back).
+    virtual float VRChargePull() const { return 0.0f; }
     // VR: where the magazine of the event last taken was (world, magazine
     // model axes: +Z its top, +Y across) and how fast it moved (m/s).
     virtual bool VRReloadEventPose(Matrix4& /*world*/, Vector3& /*velocity*/) const { return false; }

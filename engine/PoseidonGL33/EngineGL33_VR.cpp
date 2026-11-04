@@ -249,6 +249,13 @@ bool s_magInHand = false;   // left hand holds a magazine (from the pouch or the
 bool s_insertArmed = true;  // the hand has been away from the well since it took the magazine
 bool s_charging = false;    // left hand holds the charging handle
 float s_chargeStart = 0.0f; // where along the barrel it was grabbed
+float s_boltPull = 0.0f;    // how far the handle is back, 0..1
+bool s_boltBack = false;    // it reached the end: going forward chambers a round
+// The charging handle of the weapon drawn, in the weapon's frame (metres
+// ahead, up, right of its centre); not valid for weapons with no moving one.
+bool s_handleValid = false;
+Vector3 s_handleLocal = VZero;
+float s_handleTravel = 0.0f;
 bool s_ejectHeld = false;
 bool s_leftGripHeld = false;
 bool s_pouchSetHeld = false;
@@ -277,6 +284,16 @@ void PushReloadEvent(int kind, const Matrix4& pose = MIdentity, const Vector3& v
         --s_eventCount;
     }
     s_events[s_eventCount++] = ReloadEvent{kind, pose, velocity};
+}
+
+// Where the left hand takes the charging handle, for a weapon at this pose.
+Vector3 ChargeHandle(const Matrix3& orient, Vector3Par centre)
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    if (s_handleValid)
+        return centre + orient.Direction() * s_handleLocal.X() + orient.DirectionUp() * s_handleLocal.Y() +
+               orient.DirectionAside() * s_handleLocal.Z();
+    return centre - orient.Direction() * cfg.chargeBack + orient.DirectionUp() * cfg.chargeUp;
 }
 
 // The magazine models lie flat (long axis +Z, thin axis +Y).  In the hand
@@ -645,7 +662,12 @@ void UpdateWeaponPose()
         // for the magazine (UpdateReload), not the fore-end.
         const Vector3 well = centre + orient.Direction() * cfg.wellForward - orient.DirectionUp() * cfg.wellDown;
         const Vector3 supportPos = TrackedToWorld(support.position);
-        s_foreGrip = (supportPos - foreEnd).Size() < cfg.foreEndRadius &&
+        // Nor when the handle waits for the hand and is nearer (some sit far
+        // forward).
+        const float toHandle = (supportPos - ChargeHandle(orient, centre)).Size();
+        const bool forHandle = !s_chambered && s_magLoaded && toHandle < cfg.chargeRadius &&
+                               toHandle < (supportPos - foreEnd).Size();
+        s_foreGrip = !forHandle && (supportPos - foreEnd).Size() < cfg.foreEndRadius &&
                      (supportPos - foreEnd).Size() < (supportPos - well).Size();
     }
     if (s_foreGrip)
@@ -673,8 +695,9 @@ void UpdateWeaponPose()
 //   let go at the pouch  put the magazine in the hand back
 //   let go elsewhere     drop it: it falls
 //   bring it to the well insert it
-//   grip at the handle   and pull back along the barrel: chamber a round
-//                        (needed when the weapon was fired empty)
+//   grip at the handle   pull it back along the barrel to the end and let
+//                        go: it snaps forward and chambers a round (needed
+//                        after every magazine, charge_every_magazine)
 // Each step vibrates the hand doing it.  The game side (magazines, firing)
 // is in Man, which takes the events through VRTakeReloadEvent.
 void UpdateReload(const float headXr[3])
@@ -707,7 +730,8 @@ void UpdateReload(const float headXr[3])
             PushReloadEvent(Engine::VRReloadStow); // interrupted: the magazine stays in the pouch
             vr.LogLine("Reload: hand interrupted, magazine back in the pouch");
         }
-        s_magInHand = s_charging = false;
+        s_magInHand = s_charging = s_boltBack = false;
+        s_boltPull = 0.0f;
         s_magStateValid = false;
         return;
     }
@@ -715,9 +739,11 @@ void UpdateReload(const float headXr[3])
     const Matrix4& weapon = s_weaponWorld;
 
     // Left hand velocity, smoothed, for a magazine let go while moving.
+    float frameTime = 0.0f;
     {
         const auto now = std::chrono::steady_clock::now();
         const float dt = std::chrono::duration<float>(now - s_leftPrevTime).count();
+        frameTime = std::min(dt, 0.05f);
         if (dt > 0.001f && dt < 0.2f)
             s_leftVelocity = s_leftVelocity * 0.5f + (left - s_leftPrev) * (0.5f / dt);
         else
@@ -765,8 +791,14 @@ void UpdateReload(const float headXr[3])
                       edit.pouchForward, edit.pouchRight, edit.pouchDown);
         vr.LogLine(line);
     }
+    // The handle waits for the hand: a grip nearer it than the well is for it.
+    const Vector3 handle = ChargeHandle(weapon.Orientation(), weapon.Position());
+    const float toHandle = (left - handle).Size();
+    const bool atHandle = s_magLoaded && !s_chambered && toHandle < cfg.chargeRadius && toHandle < (left - well).Size();
+
     // Grip at the well with a magazine in: pull it out into the hand.
-    if (!s_magInHand && !s_charging && !s_foreGrip && gripPress && s_magLoaded && (left - well).Size() < cfg.wellRadius)
+    if (!s_magInHand && !s_charging && !s_foreGrip && !atHandle && gripPress && s_magLoaded &&
+        (left - well).Size() < cfg.wellRadius)
     {
         s_magInHand = true;
         s_insertArmed = false; // must leave the well before it can go back in
@@ -833,37 +865,62 @@ void UpdateReload(const float headXr[3])
         }
     }
 
+    // Charging handle: follows the hand back along the weapon; let go, it
+    // snaps forward.  A round goes in only when it went all the way back.
     if (s_magLoaded && !s_chambered && !s_magInHand)
     {
-        const Vector3 handle =
-            weapon.Position() - weapon.Direction() * cfg.chargeBack + weapon.DirectionUp() * cfg.chargeUp;
+        const float travel = s_handleValid ? s_handleTravel : cfg.chargePull;
         const float along = (left - weapon.Position()) * weapon.Direction();
-        if (!s_charging && gripPress && (left - handle).Size() < cfg.chargeRadius)
+        if (!s_charging && gripPress && !s_foreGrip)
         {
-            s_charging = true;
-            s_chargeStart = along;
-            vr.Haptic(0, 0.3f, 0.03f);
+            char line[128];
+            if (atHandle && s_boltPull <= 0.0f)
+            {
+                s_charging = true;
+                s_chargeStart = along;
+                vr.Haptic(0, 0.3f, 0.03f);
+                std::snprintf(line, sizeof(line), "Reload: handle taken (%.2f m from it, travel %.2f m)", toHandle, travel);
+            }
+            else
+            {
+                std::snprintf(line, sizeof(line), "Reload: left grip %.2f m from the handle (radius %.2f), %.2f m from the well",
+                              toHandle, cfg.chargeRadius, (left - well).Size());
+            }
+            vr.LogLine(line);
         }
         if (s_charging)
         {
             if (!gripNow)
             {
                 s_charging = false;
+                vr.LogLine(s_boltBack ? "Reload: handle let go from the back"
+                                      : "Reload: handle let go short of the end, nothing chambered");
             }
-            else if (s_chargeStart - along > cfg.chargePull)
+            else
             {
-                PushReloadEvent(Engine::VRReloadCharge);
-                s_charging = false;
-                vr.Haptic(0, 0.9f, 0.08f);
-                vr.Haptic(1, 0.5f, 0.05f);
-                vr.LogLine("Reload: charged");
-                Flash("Charged");
+                s_boltPull = std::clamp((s_chargeStart - along) / travel, 0.0f, 1.0f);
+                if (s_boltPull >= 0.9f && !s_boltBack)
+                {
+                    s_boltBack = true;
+                    vr.Haptic(0, 0.6f, 0.04f);
+                }
             }
         }
     }
     else
     {
         s_charging = false;
+    }
+    if (!s_charging && s_boltPull > 0.0f)
+        s_boltPull = std::max(s_boltPull - frameTime * 12.0f, 0.0f);
+    if (s_boltBack && s_boltPull < 0.05f)
+    {
+        s_boltBack = false;
+        PushReloadEvent(Engine::VRReloadCharge);
+        vr.Haptic(0, 0.9f, 0.08f);
+        vr.Haptic(1, 0.5f, 0.05f);
+        vr.LogLine("Reload: charged");
+        Flash("Charged");
     }
 
     // Reported again by the soldier's next simulation step; until then
@@ -927,7 +984,7 @@ void DrawVRStatus()
         else if (!s_magLoaded)
             hint = s_magSpares > 0 ? "NO MAGAZINE - left grip at your chest" : "NO MAGAZINE - none left";
         else if (!s_chambered)
-            hint = "Pull the charging handle back (left grip behind the sight)";
+            hint = "Pull the charging handle all the way back and let go";
     }
     const bool flash = s_flashText && std::chrono::steady_clock::now() < s_flashUntil;
     if (!hint && !flash)
@@ -1014,6 +1071,9 @@ void DrawVRTab()
     ImGui::SliderFloat("Pouch below head (m)", &c.pouchDown, 0.2f, 0.9f, "%.2f");
     ImGui::SliderFloat("Pouch ahead (m)", &c.pouchForward, 0.0f, 0.4f, "%.2f");
     ImGui::SliderFloat("Pouch right (m, - left)", &c.pouchRight, -0.4f, 0.4f, "%.2f");
+    bool everyMagazine = c.chargeEveryMagazine >= 0.5f;
+    if (ImGui::Checkbox("Every magazine needs the charging handle", &everyMagazine))
+        c.chargeEveryMagazine = everyMagazine ? 1.0f : 0.0f;
     ImGui::SliderFloat("Charge pull (m)", &c.chargePull, 0.02f, 0.15f, "%.2f");
     ImGui::SliderFloat("Magazine in hand ahead (m)", &c.magForward, -0.15f, 0.15f, "%.2f");
     ImGui::SliderFloat("Magazine in hand below (m)", &c.magDown, -0.10f, 0.20f, "%.2f");
@@ -1323,13 +1383,42 @@ void EngineGL33::VRSetMagazineState(bool loaded, int spares, bool chambered, int
             PushReloadEvent(VRReloadStow);
             PoseidonVR::VRSession::Instance().LogLine("Reload: weapon switched, magazine back in the pouch");
         }
-        s_magInHand = s_charging = false;
+        s_magInHand = s_charging = s_boltBack = s_handleValid = false;
+        s_boltPull = 0.0f;
         s_weaponKey = weaponKey;
     }
     s_magStateValid = true;
     s_magLoaded = loaded;
     s_magSpares = spares;
     s_chambered = chambered;
+}
+
+bool EngineGL33::VRChargeEveryMagazine() const
+{
+    return PoseidonVR::VRSession::Instance().Config().chargeEveryMagazine >= 0.5f;
+}
+
+void EngineGL33::VRSetChargeHandle(Vector3Par world, float travel)
+{
+    if (!s_weaponValid)
+        return;
+    const Vector3 d = world - s_weaponWorld.Position();
+    const Vector3 local(d * s_weaponWorld.Direction(), d * s_weaponWorld.DirectionUp(), d * s_weaponWorld.DirectionAside());
+    if (!s_handleValid)
+    {
+        char line[128];
+        std::snprintf(line, sizeof(line), "Reload: charging handle %.3f ahead, %.3f up, %.3f right of the weapon centre, travel %.2f",
+                      local.X(), local.Y(), local.Z(), travel);
+        PoseidonVR::VRSession::Instance().LogLine(line);
+    }
+    s_handleValid = true;
+    s_handleLocal = local;
+    s_handleTravel = travel;
+}
+
+float EngineGL33::VRChargePull() const
+{
+    return s_boltPull;
 }
 
 int EngineGL33::VRTakeReloadEvent()
