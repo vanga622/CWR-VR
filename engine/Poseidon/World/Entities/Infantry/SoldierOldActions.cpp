@@ -177,6 +177,26 @@ void Soldier::KeyboardPilot(float deltaT, SimulationImportance prec)
 
     float rlWanted = input.GetAction(UATurnRight) - input.GetAction(UATurnLeft);
 
+    // VR: the left stick's x is bound to turning (UAMoveLeft/Right), but the
+    // body follows the weapon here, so it walks sideways instead.  The walk
+    // is the nearest of the eight directions: the stick is turned by the
+    // locomotion heading, so a small part along an axis must not count.
+    Vector3 vrWalkAim;
+    if (GWorld->GetCameraType() == CamInternal && GEngine->VRAimDirection(vrWalkAim))
+    {
+        const float forward = input.GetMoveForward() + input.GetMoveFastForward() - input.GetMoveBack();
+        const float side = input.GetMoveRight() - input.GetMoveLeft();
+        const float size = sqrtf(forward * forward + side * side);
+        constexpr float kSin22 = 0.38f;
+        if (size > 0.01f)
+        {
+            if (fabsf(forward) < kSin22 * size)
+                fbWanted = 0;
+            if (fabsf(side) >= kSin22 * size)
+                rlWanted = side > 0 ? 1.0f : -1.0f;
+        }
+    }
+
     {
         float delta = turnWanted - _turnWanted;
         saturate(delta, -3 * deltaT, +3 * deltaT);

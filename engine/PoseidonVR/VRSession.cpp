@@ -356,6 +356,16 @@ void FillFakeFrame(StereoFrame& out)
         s_controllers.b = k->b;
     }
 
+    // CWR_VR_FAKE_SCRIPT=walk:<x>,<y>: left stick held there from 8 s on, once
+    // the mission has started (checks walking in every direction).
+    float walkX = 0.0f, walkY = 0.0f;
+    if (script && std::sscanf(script, "walk:%f,%f", &walkX, &walkY) == 2 &&
+        std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count() >= 8.0f)
+    {
+        s_controllers.moveX = walkX;
+        s_controllers.moveY = walkY;
+    }
+
     // CWR_VR_FAKE_SCRIPT=charge: every 16 s pull the magazine out by hand, let
     // it fall, take one from the pouch, insert it, then left hand to the
     // charging handle (of an M16 held by the fake right hand), pull it back,
