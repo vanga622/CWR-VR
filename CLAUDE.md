@@ -4,7 +4,7 @@ This repository is a fork of the Arma: Cold War Assault Remastered engine (coden
 
 ## Goal
 
-Full room-scale VR for infantry play: stereo rendering with head tracking, motion controllers, the weapon held and aimed with the hand, physical manual reloading, then hand tracking. Target hardware: Meta Quest / Pico over Virtual Desktop (VDXR runtime), SteamVR as fallback.
+Full room-scale VR for infantry play: stereo rendering with head tracking, motion controllers, the weapon held and aimed with the hand, physical manual reloading. Target hardware: Meta Quest / Pico over Virtual Desktop (VDXR runtime), SteamVR as fallback.
 
 ## Rules
 
@@ -53,5 +53,4 @@ Put new VR code in `engine/PoseidonVR/` as its own library, and keep edits to ex
 - [x] M4 Weapon at the controller pose, fire from the barrel, two-handed grip
 - [x] M5 Arm IK, eye height follows stance (stand/crouch/prone) (rigid arm follow, not true IK; the game has no rifle crouch, so a real crouch only lowers the view)
 - [ ] M6 Manual reload: eject, grab magazine from pouch, insert, charge  ← current
-- [ ] M7 Hand tracking (`XR_EXT_hand_tracking`)
-- [ ] M8 Vehicles, binoculars/scopes, map in hand
+- [ ] M7 Vehicles, binoculars/scopes, map in hand

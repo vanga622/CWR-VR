@@ -93,7 +93,6 @@ Everything VR writes to `vr.log`: the runtime, its extensions, frame timing and 
 - [x] Weapon at the controller, two-handed grip
 - [x] Arms follow the weapon, eye height follows stance
 - [ ] **Manual reload** (in progress)
-- [ ] Hand tracking (`XR_EXT_hand_tracking`)
 - [ ] Vehicles, binoculars and the map in the hand
 
 ## Repository layout
