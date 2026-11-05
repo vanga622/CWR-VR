@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <filesystem>
 #include <Poseidon/AI/AI.hpp>
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Core/Global.hpp>
@@ -275,6 +277,18 @@ void Globals::Init()
         LoadBanksEx("dta", true);
         LoadBanksEx("addons", true, true);
         LoadBanksEx("Campaigns", false);
+#ifdef _WIN32
+        // VR: our own model parts sit next to the executable (resources/vr), not in
+        // the game data; only VR draws them, and nothing else has this prefix.
+        char* exePath = nullptr;
+        if (_get_pgmptr(&exePath) == 0 && exePath)
+        {
+            const std::filesystem::path dir = std::filesystem::path(exePath).parent_path();
+            std::error_code error;
+            if (std::filesystem::exists(dir / "vr.pbo", error))
+                GFileBanks.Load(RString((dir.string() + "\\").c_str()), RString(""), RString("vr"), true, nullptr, nullptr, nullptr);
+        }
+#endif
         AddonSystem::ParseAllAddonConfigs();
         AddonSystem::ClearAddonConfigs();
         AddonSystem::MarkAllAddonsLockable();

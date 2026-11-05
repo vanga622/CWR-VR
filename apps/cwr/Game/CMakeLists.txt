@@ -92,3 +92,9 @@ set_target_properties(PoseidonGame PROPERTIES
 
 include(${CMAKE_SOURCE_DIR}/cmake/DistCopy.cmake)
 dist_copy(PoseidonGame)
+
+# VR: our own model parts (resources/vr, built by make_parts.py) next to the game.
+add_custom_target(VRParts ALL
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${DIST_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/resources/vr/vr.pbo" "${DIST_DIR}/vr.pbo"
+    VERBATIM)
