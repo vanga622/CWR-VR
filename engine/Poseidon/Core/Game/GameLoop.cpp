@@ -189,6 +189,9 @@ bool AppIdle()
     Poseidon::Foundation::MemoryFrameMaintenance();
 
     bool focused = (GApp->m_keepFocus || GApp->m_appActive) && !GApp->m_appPaused && !GApp->m_appIconic;
+    // VR: the headset needs its frames whatever happens to the desktop window.
+    if (GEngine && GEngine->VRRunning())
+        focused = true;
     if (GSoundsys)
         GSoundsys->Activate(focused);
     const bool testMissionActive = !AppConfig::Instance().GetTestMissionPath().empty();

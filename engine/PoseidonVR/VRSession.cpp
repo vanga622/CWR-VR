@@ -150,10 +150,29 @@ const ConfigKey kConfigKeys[] = {
     {"reload", "charge_radius", &VRConfig::chargeRadius, "how close the left hand must be to grab it, metres"},
     {"reload", "charge_pull", &VRConfig::chargePull, "pull back this far to charge, weapons with no moving handle, metres"},
     {"reload", "charge_every_magazine", &VRConfig::chargeEveryMagazine, "1 = every magazine needs the charging handle, 0 = only after firing dry"},
+    {"reload", "sound_volume", &VRConfig::soundVolume, "hand reload sounds: volume factor"},
+    {"reload", "sound_insert_start", &VRConfig::soundInsertStart, "magazine going in: start in the reload sound, seconds"},
+    {"reload", "sound_insert_end", &VRConfig::soundInsertEnd, "magazine going in: end in the reload sound, seconds"},
+    {"reload", "sound_bolt_back_start", &VRConfig::soundBoltBackStart, "handle reaching the back: start in the reload sound, seconds"},
+    {"reload", "sound_bolt_back_end", &VRConfig::soundBoltBackEnd, "handle reaching the back: end in the reload sound, seconds"},
+    {"reload", "sound_bolt_forward_start", &VRConfig::soundBoltForwardStart, "bolt going forward: start in the reload sound, seconds"},
+    {"reload", "sound_bolt_forward_end", &VRConfig::soundBoltForwardEnd, "bolt going forward: end in the reload sound, seconds"},
+    {"reload", "sound_gun_insert_start", &VRConfig::soundGunInsertStart, "handgun magazine going in: start in its reload sound, seconds"},
+    {"reload", "sound_gun_insert_end", &VRConfig::soundGunInsertEnd, "handgun magazine going in: end in its reload sound, seconds"},
+    {"reload", "sound_gun_bolt_back_start", &VRConfig::soundGunBoltBackStart, "handgun slide reaching the back: start, seconds"},
+    {"reload", "sound_gun_bolt_back_end", &VRConfig::soundGunBoltBackEnd, "handgun slide reaching the back: end, seconds"},
+    {"reload", "sound_gun_bolt_forward_start", &VRConfig::soundGunBoltForwardStart, "handgun slide going forward: start, seconds"},
+    {"reload", "sound_gun_bolt_forward_end", &VRConfig::soundGunBoltForwardEnd, "handgun slide going forward: end, seconds"},
     {"reload", "mag_forward", &VRConfig::magForward, "magazine in the left hand: ahead of the grip, metres"},
     {"reload", "mag_down", &VRConfig::magDown, "magazine in the left hand: below the grip, metres"},
     {"reload", "mag_pitch", &VRConfig::magPitch, "magazine in the left hand: forward tilt of its top, degrees (180 = upside down)"},
     {"reload", "mag_scale", &VRConfig::magScale, "magazine in the left hand: model scale"},
+    {"scope", "scope_size", &VRConfig::scopeSize, "image of a telescopic sight, pixels (takes effect on the next start)"},
+    {"scope", "scope_zoom", &VRConfig::scopeZoom, "magnification = this / the weapon's field of view"},
+    {"scope", "scope_apparent", &VRConfig::scopeApparent, "half size of the sight's image as the eye sees it, tan(angle)"},
+    {"scope", "scope_relief", &VRConfig::scopeRelief, "eye relief behind the rear lens, metres"},
+    {"scope", "scope_pupil", &VRConfig::scopePupil, "exit pupil radius: how far off the axis the eye still sees through, metres"},
+    {"scope", "scope_range", &VRConfig::scopeRange, "the view through the sight is only drawn with the head this close, metres"},
 };
 
 std::filesystem::file_time_type s_configTime;
@@ -356,6 +375,51 @@ void FillFakeFrame(StereoFrame& out)
         s_controllers.b = k->b;
     }
 
+    // CWR_VR_FAKE_SCRIPT=aim:<x>,<y>,<z>: right hand fixed there relative to
+    // the head (metres, -z ahead), weapon pointing straight ahead (sights).
+    float aimAt[3] = {0, 0, 0};
+    if (script && std::sscanf(script, "aim:%f,%f,%f", &aimAt[0], &aimAt[1], &aimAt[2]) == 3)
+    {
+        s_controllers.grip[0] = 0.0f;
+        for (HandPose* p : {&out.grip[1], &out.aim[1]})
+        {
+            p->position[0] = aimAt[0];
+            p->position[1] = headY + aimAt[1];
+            p->position[2] = aimAt[2];
+            p->orientation[0] = p->orientation[1] = p->orientation[2] = 0.0f;
+            p->orientation[3] = 1.0f;
+        }
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+            p->position[0] = -0.6f;
+    }
+
+    // CWR_VR_FAKE_SCRIPT=inspect:<degrees>: weapon held up before the eyes,
+    // one hand, turned that far about the vertical (checks the models).
+    float inspectYaw = 0.0f;
+    if (script && std::sscanf(script, "inspect:%f", &inspectYaw) == 1)
+    {
+        s_controllers.grip[0] = 0.0f;
+        const float half = inspectYaw * 0.5f * 3.14159265f / 180.0f;
+        for (HandPose* p : {&out.grip[1], &out.aim[1]})
+        {
+            p->position[0] = 0.0f;
+            p->position[1] = headY - 0.12f;
+            p->position[2] = -0.42f;
+            p->orientation[1] = std::sin(half);
+            p->orientation[3] = std::cos(half);
+        }
+        for (HandPose* p : {&out.grip[0], &out.aim[0]})
+            p->position[0] = -0.6f;
+    }
+
+    // CWR_VR_FAKE_TRIGGER=<seconds>: the trigger pulled every second from then on.
+    if (const char* trigger = std::getenv("CWR_VR_FAKE_TRIGGER"))
+    {
+        const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - s_fakeStart).count();
+        if (t >= std::atof(trigger) && std::fmod(t, 1.0f) < 0.5f)
+            s_controllers.trigger[1] = 1.0f;
+    }
+
     // CWR_VR_FAKE_SCRIPT=walk:<x>,<y>: left stick held there from 8 s on, once
     // the mission has started (checks walking in every direction).
     float walkX = 0.0f, walkY = 0.0f;
@@ -398,13 +462,26 @@ void FillFakeFrame(StereoFrame& out)
         for (const Key& key : kKeys)
             if (t >= key.time)
                 k = &key;
+        // CWR_VR_FAKE_HANDLE=<x>,<y>,<z>: the handle of the weapon held, in its
+        // model, for a weapon other than the M16 the keys are made for.
+        Key at = *k;
+        float handleX = 0.0f, handleY = 0.0f, handleZ = 0.0f;
+        const char* handle = std::getenv("CWR_VR_FAKE_HANDLE");
+        if (handle && t >= 6.5f && t < 13.0f && std::sscanf(handle, "%f,%f,%f", &handleX, &handleY, &handleZ) == 3)
+        {
+            at.x += handleZ;
+            at.y += handleY - 0.109f;
+            at.z += handleX - 0.173f;
+            if (t >= 8.0f && t < 11.0f)
+                at.z += 0.03f; // the longest travel, past the M16's
+        }
         for (HandPose* p : {&out.grip[0], &out.aim[0]})
         {
-            p->position[0] = k->x;
-            p->position[1] = k->y + headY;
-            p->position[2] = k->z;
+            p->position[0] = at.x;
+            p->position[1] = at.y + headY;
+            p->position[2] = at.z;
         }
-        s_controllers.grip[0] = k->grip;
+        s_controllers.grip[0] = at.grip;
     }
 
     // CWR_VR_FAKE_SCRIPT=tactical: every 14 s pull the magazine out of the well

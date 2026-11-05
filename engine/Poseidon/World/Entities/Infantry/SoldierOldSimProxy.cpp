@@ -439,7 +439,7 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         Vector3 vrBoltCentre;
         float vrBoltTravel = 0.0f;
         const bool vrBolt = vrHeldWeapon && VRWeaponBolt(pshape, pLevel, vrBoltCentre, vrBoltTravel);
-        const float vrBoltBack = vrBolt ? GEngine->VRChargePull() * vrBoltTravel : 0.0f;
+        const float vrBoltBack = vrBolt ? VRBoltPosition(pshape, false) * vrBoltTravel : 0.0f;
         if (vrBolt)
             GEngine->VRSetChargeHandle(pTransform.FastTransform(vrBoltCentre), vrBoltTravel);
         if (vrBoltBack > 0.0f)
@@ -448,11 +448,27 @@ void Man::DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, 
         shape->Draw(this, lights, ClipAll, shapeSpec, pTransform, invPTransform);
         if (vrHideMagazine)
             VRShowWeaponMagazine(pshape, pLevel, true);
-        if (vrBoltBack > 0.0f)
+        if (vrBoltBack > 0.0f || (vrBolt && VRWeaponBoltIsPart(pshape)))
         {
             VRShowWeaponMagazine(pshape, pLevel, true, "vr_bolt");
             VRDrawWeaponBolt(this, pshape, pLevel, pTransform, vrBoltBack, z2, lights);
         }
+        // The bolt itself runs back at every shot, even when the handle stays.
+        const float vrCarrierBack = vrBolt ? VRBoltPosition(pshape, true) * vrBoltTravel : 0.0f;
+        // The bolt knocks a dust cover open; it stays open from then on.
+        float vrCover = 0.0f;
+        if (vrBolt && VRWeaponHasDustCover(pshape))
+        {
+            if (vrCarrierBack > 0.0f && _vrCoverOpenOn != pshape)
+            {
+                _vrCoverOpenOn = pshape;
+                _vrCoverOpenTime = Glob.uiTime;
+            }
+            if (_vrCoverOpenOn == pshape)
+                vrCover = floatMin((Glob.uiTime - _vrCoverOpenTime) / 0.06f, 1.0f);
+        }
+        if (vrCarrierBack > 0.0f || (vrBolt && _vrCoverOpenOn == pshape))
+            VRDrawWeaponPort(this, pshape, pTransform, vrCarrierBack, vrCover, z2, lights);
         GEngine->SetPassKindHint(savedHint);
     }
 
@@ -471,6 +487,17 @@ void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
     Matrix4 world;
     if (!GEngine->VRMagazineInHandPose(world))
         return;
+    // Test aid (CWR_VR_FAKE_MAGVIEW=<degrees>): the held magazine before the
+    // eyes, 0 = from the side, 90 = its top towards the eye, -90 = its bottom.
+    if (const char* view = std::getenv("CWR_VR_FAKE_MAGVIEW"))
+    {
+        const Camera* cam = GScene->GetCamera();
+        const float a = static_cast<float>(std::atof(view)) * 3.14159265f / 180.0f;
+        Matrix3 r;
+        r.SetDirectionAndUp(cam->DirectionUp() * std::cos(a) - cam->Direction() * std::sin(a), cam->DirectionAside());
+        world.SetOrientation(r);
+        world.SetPosition(cam->Position() + cam->Direction() * 0.22f);
+    }
 
     // The very magazine the hand holds (Man::VRReloadStep): the magazine
     // piece of the weapon's own model (its texture), else the stand-in
@@ -482,7 +509,7 @@ void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
     {
         const render::PassKindHint hint = GEngine->GetPassKindHint();
         GEngine->SetPassKindHint(render::PassKindHint::Cockpit);
-        const bool drawn = VRDrawWeaponMagazine(this, weapon->_model, world, z2, lights);
+        const bool drawn = VRDrawWeaponMagazine(this, weapon->_model, world, _vrHandMag->_ammo > 0, z2, lights);
         GEngine->SetPassKindHint(hint);
         if (drawn)
             return;
@@ -491,6 +518,7 @@ void Man::VRDrawMagazineInHand(int level, float z2, const LightList& lights)
     if (!pshape)
         return;
 
+    world = world * Matrix4(MScale, VRMagazineModelScale(_vrHandMag->_type));
     const Matrix4 invWorld = world.InverseScaled();
     int pLevel = pshape->FindSpecLevel(VIEW_PILOT);
     if (pLevel < 0)
@@ -594,6 +622,11 @@ int Man::PassNum(int lod)
 void Man::Draw(int level, ClipFlags clipFlags, const FrameBase& pos)
 {
     if (level == LOD_INVISIBLE)
+    {
+        return;
+    }
+    // VR: the view through the sight starts inside the player's own weapon.
+    if (GEngine->VRScopePass() && GWorld->CameraOn() == this)
     {
         return;
     }

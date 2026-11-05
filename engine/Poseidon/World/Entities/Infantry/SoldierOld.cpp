@@ -1,4 +1,6 @@
 #include <Poseidon/World/Entities/Infantry/SoldierOldCommon.hpp>
+#include <Poseidon/Audio/IAudioSystem.hpp>
+#include <Poseidon/Audio/SoundScene.hpp>
 #include <Poseidon/Core/Application.hpp>
 #include <Poseidon/Input/InputSubsystem.hpp>
 #include <algorithm>
@@ -803,10 +805,100 @@ Matrix4 Man::AnimateProxyMatrix(int level, const ProxyObject& proxy) const
     return base::AnimateProxyMatrix(level, proxy);
 }
 
+namespace
+{
+// VR: telescopic sights of the weapon models (model space, +x towards the
+// stock, metres): rear end of the tube, its axis, the rear lens's radius, and
+// how high the bore runs (the sight is zeroed from that far above it).
+struct VRWeaponScope
+{
+    const char* model;
+    float rearX, axisY, axisZ, radius, boreY;
+};
+
+const VRWeaponScope kVRWeaponScopes[] = {
+    {"data3d\\m21_proxy.p3d", 0.122f, 0.1235f, 0.0f, 0.0245f, 0.078f},
+    {"data3d\\svd_dragunov_proxy.p3d", 0.156f, 0.1195f, 0.0f, 0.0185f, 0.051f},
+    {"steyr\\steyr.p3d", 0.183f, 0.133f, 0.0f, 0.015f, 0.069f},
+    {"g36a\\g36.p3d", 0.157f, 0.150f, 0.0f, 0.0125f, 0.073f},
+    {"xms\\xms.p3d", 0.125f, 0.1855f, 0.0f, 0.0185f, 0.082f},
+    {"o_wp\\remington.p3d", 0.185f, 0.108f, 0.0f, 0.021f, 0.0695f},
+};
+
+const VRWeaponScope* FindVRWeaponScope(const LODShapeWithShadow* shape)
+{
+    if (!shape)
+        return nullptr;
+    for (const VRWeaponScope& s : kVRWeaponScopes)
+        if (strcmpi(shape->GetName(), s.model) == 0)
+            return &s;
+    return nullptr;
+}
+} // namespace
+
+// VR: the weapon's sight, if the player holds one and sees through his own
+// eyes (not from a vehicle, not dead).
+void Man::VRReportScope()
+{
+    const WeaponType* weapon = nullptr;
+    const MuzzleType* muzzle = nullptr;
+    if (_currentWeapon >= 0 && _currentWeapon < NMagazineSlots() && !IsDead() && GWorld->CameraOn() == this)
+    {
+        weapon = GetMagazineSlot(_currentWeapon)._weapon;
+        muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
+    }
+    const VRWeaponScope* scope = weapon && muzzle ? FindVRWeaponScope(weapon->_model) : nullptr;
+    if (!scope || !EnableOptics())
+    {
+        GEngine->VRSetScope(false, VZero, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+    Vector3 barrel = muzzle->_muzzleDir;
+    if (barrel.SquareSize() < 1e-6f)
+        barrel = VForward;
+    Matrix3 proxyAxes;
+    proxyAxes.SetDirectionAndUp(barrel, VUp);
+    const Vector3 eyepiece = proxyAxes.InverseRotation() * Vector3(scope->rearX, scope->axisY, scope->axisZ);
+    GEngine->VRSetScope(true, eyepiece, scope->radius, muzzle->_opticsZoomMin, muzzle->_opticsZoomMax);
+}
+
+// VR: the game's own sight picture (reticle and mask) in the sight's image.
+void Man::VRDrawScopeReticle()
+{
+    if (_currentWeapon < 0 || _currentWeapon >= NMagazineSlots())
+        return;
+    const MuzzleType* muzzle = GetMagazineSlot(_currentWeapon)._muzzle;
+    LODShapeWithShadow* shape = muzzle ? muzzle->_opticsModel.GetRef() : nullptr;
+    if (!shape)
+        return;
+    muzzle->_animFire.Hide(shape, 0);
+    Draw2D(shape, 0, GetOpticsColor(this), /*preserveAspect4x3*/ true);
+}
+
 bool Man::VRWeaponModelMatrix(Matrix4& out, bool firing) const
 {
     if (_currentWeapon < 0 || !GEngine->VRWeaponPose(out, firing))
         return false;
+    // A sight is zeroed: at the distance the game gives this zoom the shot
+    // comes up from the bore and falls back onto the reticle.
+    if (firing && GEngine->VRHasScope())
+    {
+        const MagazineSlot& slot = GetMagazineSlot(_currentWeapon);
+        const VRWeaponScope* scope = FindVRWeaponScope(slot._weapon->_model);
+        const Magazine* magazine = slot._magazine;
+        if (scope && magazine && magazine->_type)
+        {
+            const MuzzleType* muzzle = slot._muzzle;
+            const float distance = Interpolativ(GEngine->VRScopeFov(), muzzle->_opticsZoomMin, muzzle->_opticsZoomMax,
+                                                muzzle->_distanceZoomMin, muzzle->_distanceZoomMax);
+            const float invSpeed = magazine->_type->_invInitSpeed;
+            const float fallPerM = distance * invSpeed * invSpeed * 0.5f * G_CONST;
+            const float risePerM = (scope->axisY - scope->boreY) / floatMax(distance, 1.0f);
+            Matrix3 zeroed;
+            zeroed.SetDirectionAndUp(out.Direction() + out.DirectionUp() * (fallPerM + risePerM), out.DirectionUp());
+            out.SetOrientation(zeroed);
+        }
+    }
     Vector3 barrel = GetMagazineSlot(_currentWeapon)._muzzle->_muzzleDir;
     if (barrel.SquareSize() < 1e-6f)
         barrel = VForward;
@@ -910,6 +1002,7 @@ struct VRMagazineFeed
     const char* magazine; // CfgWeapons magazine class
     const char* model;    // model in the hand and on the ground
     bool placeholder;     // the model is not this magazine's own shape
+    float scale = 1.0f;   // of that model
 };
 
 const VRMagazineFeed kVRMagazineFeeds[] = {
@@ -919,10 +1012,12 @@ const VRMagazineFeed kVRMagazineFeeds[] = {
     {"SVDDragunov", "misc\\mag_nato.p3d", true},  {"SteyrMag", "misc\\mag_nato.p3d", true},
     {"G36aMag", "misc\\mag_nato.p3d", true},      {"FALMag", "misc\\mag_nato.p3d", true},
     {"HKG3Mag", "misc\\mag_nato.p3d", true},      {"UZIMag", "misc\\mag_nato.p3d", true},
-    {"BizonMag", "misc\\mag_nato.p3d", true},     {"BerettaMag", "misc\\mag_nato.p3d", true},
-    {"CZ75Mag", "misc\\mag_nato.p3d", true},      {"GlockMag", "misc\\mag_nato.p3d", true},
-    {"GlockSMag", "misc\\mag_nato.p3d", true},    {"IngramMag", "misc\\mag_nato.p3d", true},
-    {"SkorpionMag", "misc\\mag_nato.p3d", true},  {"TokarevMag", "misc\\mag_nato.p3d", true},
+    {"BizonMag", "misc\\mag_nato.p3d", true},     {"IngramMag", "misc\\mag_nato.p3d", true},
+    {"SkorpionMag", "misc\\mag_nato.p3d", true},
+    // Pistols: the game has no model of theirs, this one is ours (resources/vr).
+    {"BerettaMag", "vr\\vr_mag_pistol.p3d", false}, {"CZ75Mag", "vr\\vr_mag_pistol.p3d", false},
+    {"GlockMag", "vr\\vr_mag_pistol.p3d", false},   {"GlockSMag", "vr\\vr_mag_pistol.p3d", false},
+    {"TokarevMag", "vr\\vr_mag_pistol.p3d", false},
 };
 
 const VRMagazineFeed* FindVRMagazineFeed(const MagazineType* type)
@@ -946,6 +1041,20 @@ bool Man::VRHandReloads(int weapon) const
     return muzzle && muzzle->_magazines.Size() > 0 && FindVRMagazineFeed(muzzle->_magazines[0]) != nullptr;
 }
 
+// The shape bank drops a model nobody holds.  One asked for every frame would
+// load again each time and show black, its texture never ready: held for good.
+LODShapeWithShadow* VRHeldShape(const char* name)
+{
+    static auto* held = new RefArray<LODShapeWithShadow>;
+    for (int i = 0; i < held->Size(); i++)
+        if (strcmpi((*held)[i]->GetName(), name) == 0)
+            return (*held)[i];
+    Ref<LODShapeWithShadow> shape = Shapes.New(name, false, false);
+    if (shape)
+        held->Add(shape);
+    return shape;
+}
+
 LODShapeWithShadow* VRMagazineModel(const MagazineType* type)
 {
     const VRMagazineFeed* feed = FindVRMagazineFeed(type);
@@ -958,7 +1067,13 @@ LODShapeWithShadow* VRMagazineModel(const MagazineType* type)
         LOG_INFO(Graphics, "VR: magazine {} shown with {}{}", static_cast<const char*>(type->GetName()), feed->model,
                  feed->placeholder ? " (PLACEHOLDER: no model of this magazine in the game data)" : "");
     }
-    return Shapes.New(feed->model, false, false);
+    return VRHeldShape(feed->model);
+}
+
+float VRMagazineModelScale(const MagazineType* type)
+{
+    const VRMagazineFeed* feed = FindVRMagazineFeed(type);
+    return feed ? feed->scale : 1.0f;
 }
 
 
@@ -1048,20 +1163,137 @@ void FindMeshPieces(const Shape* shape, AutoArray<MeshPiece>& pieces)
         }
     }
 }
+
+// Edges used by one face only, as pairs of ends: where a surface is open.
+template <class Faces> void VROpenEdges(const Shape* shape, const Faces& faces, AutoArray<Vector3>& open)
+{
+    AutoArray<Vector3> ends;
+    AutoArray<int> uses;
+    auto same = [](const Vector3& a, const Vector3& b) { return (a - b).SquareSize() < 1e-6f; };
+    for (int fi = 0; fi < faces.Size(); fi++)
+    {
+        const Poly& poly = shape->Face(shape->FaceIndexToOffset(faces[fi]));
+        for (int k = 0; k < poly.N(); k++)
+        {
+            const Vector3 a = shape->Pos(poly.GetVertex(k));
+            const Vector3 b = shape->Pos(poly.GetVertex((k + 1) % poly.N()));
+            int found = -1;
+            for (int e = 0; e < uses.Size() && found < 0; e++)
+                if ((same(ends[e * 2], a) && same(ends[e * 2 + 1], b)) || (same(ends[e * 2], b) && same(ends[e * 2 + 1], a)))
+                    found = e;
+            if (found >= 0)
+            {
+                uses[found]++;
+                continue;
+            }
+            ends.Add(a);
+            ends.Add(b);
+            uses.Add(1);
+        }
+    }
+    for (int e = 0; e < uses.Size(); e++)
+        if (uses[e] == 1)
+        {
+            open.Add(ends[e * 2]);
+            open.Add(ends[e * 2 + 1]);
+        }
+}
+
+// The magazine models are open tubes: their top is never seen in the weapon.
+// Finds the widest open loop facing up and gives the frame that fits our top
+// (resources/vr, x along, y out of the magazine, z across) to it.  The top is
+// made at about the real size: a large scale would dim its lighting.
+constexpr float kVRMagTopLength = 0.07f;
+constexpr float kVRMagTopWidth = 0.022f;
+
+bool VRFindMagazineMouth(const Shape* shape, const AutoArray<VertexIndex>& faces, Matrix4& mouth)
+{
+    AutoArray<Vector3> ends;
+    VROpenEdges(shape, faces, ends);
+    const int edges = ends.Size() / 2;
+    AutoArray<bool> done;
+    done.Resize(edges);
+    for (int e = 0; e < edges; e++)
+        done[e] = false;
+    auto same = [](const Vector3& a, const Vector3& b) { return (a - b).SquareSize() < 1e-6f; };
+    float bestArea = 0.0f;
+    for (int start = 0; start < edges; start++)
+    {
+        if (done[start])
+            continue;
+        done[start] = true;
+        AutoArray<Vector3> loop;
+        loop.Add(ends[start * 2]);
+        Vector3 at = ends[start * 2 + 1];
+        for (bool walking = true; walking;)
+        {
+            loop.Add(at);
+            walking = false;
+            for (int e = 0; e < edges && !walking; e++)
+            {
+                if (done[e] || !(same(ends[e * 2], at) || same(ends[e * 2 + 1], at)))
+                    continue;
+                at = same(ends[e * 2], at) ? ends[e * 2 + 1] : ends[e * 2];
+                done[e] = true;
+                walking = true;
+            }
+        }
+        if (loop.Size() < 4 || !same(loop[0], loop[loop.Size() - 1]))
+            continue;
+        const Vector3 first = loop[0];
+        Vector3 normal = VZero;
+        for (int i = 1; i + 1 < loop.Size(); i++)
+            normal += (loop[i] - first).CrossProduct(loop[i + 1] - first);
+        const float area = normal.Size() * 0.5f;
+        if (area <= bestArea)
+            continue;
+        normal = normal.Normalized();
+        if (normal.Y() < 0.0f)
+            normal = normal * -1.0f;
+        if (normal.Y() < 0.5f)
+            continue; // an end of a tube lying along the weapon, not a top
+        const Vector3 along = (Vector3(1, 0, 0) - normal * normal.X()).Normalized();
+        Vector3 across = normal.CrossProduct(along);
+        if (across.Z() < 0.0f)
+            across = across * -1.0f;
+        float a0 = 1e10f, a1 = -1e10f, b0 = 1e10f, b1 = -1e10f, height = 0.0f;
+        for (int i = 0; i + 1 < loop.Size(); i++)
+        {
+            const Vector3 d = loop[i] - first;
+            a0 = floatMin(a0, d.DotProduct(along));
+            a1 = floatMax(a1, d.DotProduct(along));
+            b0 = floatMin(b0, d.DotProduct(across));
+            b1 = floatMax(b1, d.DotProduct(across));
+            height += d.DotProduct(normal);
+        }
+        height /= loop.Size() - 1;
+        const Vector3 centre = first + along * ((a0 + a1) * 0.5f) + across * ((b0 + b1) * 0.5f) + normal * height;
+        Matrix3 turn;
+        turn.SetDirectionAndUp(across, normal);
+        Matrix4 frame = MIdentity;
+        frame.SetOrientation(turn);
+        const float wide = (b1 - b0) / kVRMagTopWidth;
+        mouth = Matrix4(MTranslation, centre) * frame * Matrix4(MScale, (a1 - a0) / kVRMagTopLength, wide, wide);
+        bestArea = area;
+    }
+    return bestArea > 0.0f;
+}
 } // namespace
 
 // VR (M6): where each weapon model keeps its magazine (model space, the
 // region its magazine pieces lie in, found by inspecting every model's mesh
 // pieces; see the dump CWR_VR_DUMP_WEAPONS).  The magazine drawn in the hand
 // and on the ground is that very piece of the weapon model, with the
-// weapon's own texture and UV mapping.  Pistols are missing: their
-// magazines are merged into the grip (only the base plate is separate).
+// weapon's own texture and UV mapping.  Pistol magazines are merged into the
+// grip: only the base plate can leave the weapon (plate: every face in the
+// box), and the hand and the ground show the stand-in model.
 namespace
 {
 struct VRWeaponMagBox
 {
     const char* model;
     float x0, x1, y0, y1, z; // z: |lateral| limit
+    bool plate = false;
 };
 
 const VRWeaponMagBox kVRWeaponMagBoxes[] = {
@@ -1083,6 +1315,11 @@ const VRWeaponMagBox kVRWeaponMagBoxes[] = {
     {"bizon\\bizon.p3d", 0.19f, 0.40f, -0.05f, 0.045f, 0.015f},
     {"o\\guns\\sa61skorpion.p3d", -0.08f, -0.02f, -0.06f, 0.03f, 0.01f},
     {"o_wp\\ingram.p3d", 0.045f, 0.08f, -0.165f, -0.05f, 0.02f},
+    {"o\\guns\\beretta92f.p3d", 0.03f, 0.11f, -0.085f, -0.074f, 0.04f, true},
+    {"o\\guns\\cz75.p3d", 0.03f, 0.11f, -0.082f, -0.072f, 0.04f, true},
+    {"o\\guns\\glock17.p3d", 0.03f, 0.11f, -0.08f, -0.072f, 0.04f, true},
+    {"o_wp\\glock17sil.p3d", 0.03f, 0.11f, -0.08f, -0.072f, 0.04f, true},
+    {"o\\guns\\tokarevt33.p3d", 0.03f, 0.11f, -0.08f, -0.0715f, 0.04f, true},
 };
 
 const VRWeaponMagBox* FindVRWeaponMagBox(const LODShapeWithShadow* shape)
@@ -1095,34 +1332,119 @@ const VRWeaponMagBox* FindVRWeaponMagBox(const LODShapeWithShadow* shape)
 
 // VR (M6): where each weapon model keeps its charging handle (model space,
 // first-person level, +x towards the stock) and how far it travels back,
-// metres.  The SVD, the vz.58 and the pistols are missing: their handle or slide is
-// merged into the receiver, so nothing moves and the hand pulls at
-// charge_back.
+// metres.  The SVD and the vz.58 have no handle in their models (it is only
+// painted on the receiver): they get a part of ours (resources/vr), drawn at
+// partAt.  reciprocates: it moves with the bolt at every shot (a handle that
+// stays forward does not).  locksBack: it stays back after the last round.
 struct VRWeaponBoltBox
 {
     const char* model;
     float x0, x1, y0, y1, z0, z1;
     float travel;
+    bool reciprocates = false;
+    bool locksBack = false;
+    bool byFace = false; // merged with other parts: every face in the box
+    const char* part = nullptr;
+    float partAt[3] = {0, 0, 0};
 };
 
 const VRWeaponBoltBox kVRWeaponBoltBoxes[] = {
-    {"data3d\\m16_proxy.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f},
-    {"data3d\\xm-177e2_proxy.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f},
-    {"xms\\xms.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f},
-    {"data3d\\ak_47_proxy.p3d", -0.045f, -0.03f, 0.04f, 0.055f, 0.005f, 0.03f, 0.09f},
-    {"data3d\\ak_74_proxy.p3d", -0.045f, -0.03f, 0.04f, 0.055f, 0.005f, 0.03f, 0.09f},
-    {"data3d\\ak_74_su_proxy.p3d", -0.055f, -0.04f, 0.055f, 0.075f, 0.01f, 0.04f, 0.08f},
-    {"data3d\\hkm5_sd6_proxy.p3d", -0.23f, -0.15f, 0.095f, 0.12f, 0.005f, 0.03f, 0.07f},
-    {"data3d\\m21_proxy.p3d", -0.08f, -0.01f, 0.055f, 0.095f, 0.005f, 0.03f, 0.09f},
-    {"steyr\\steyr.p3d", -0.08f, -0.04f, 0.055f, 0.09f, -0.045f, -0.01f, 0.09f},
-    {"g36a\\g36.p3d", 0.05f, 0.07f, 0.07f, 0.095f, 0.005f, 0.03f, 0.05f},
-    {"o\\guns\\fal.p3d", -0.075f, 0.0f, 0.06f, 0.095f, 0.005f, 0.056f, 0.08f},
-    {"o\\guns\\hkg3a4.p3d", -0.37f, -0.32f, 0.095f, 0.11f, -0.03f, -0.01f, 0.08f},
-    {"o\\guns\\uzi.p3d", 0.02f, 0.045f, 0.088f, 0.108f, -0.012f, 0.012f, 0.07f},
-    {"bizon\\bizon.p3d", 0.0f, 0.045f, 0.05f, 0.065f, 0.0f, 0.025f, 0.08f},
-    {"o\\guns\\sa61skorpion.p3d", 0.05f, 0.068f, 0.068f, 0.08f, -0.012f, 0.016f, 0.05f},
-    {"o_wp\\ingram.p3d", -0.012f, 0.005f, 0.06f, 0.075f, -0.016f, 0.0f, 0.06f},
+    {"data3d\\m16_proxy.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f, false, false},
+    {"data3d\\xm-177e2_proxy.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f, false, false},
+    {"xms\\xms.p3d", 0.16f, 0.19f, 0.095f, 0.12f, -0.02f, 0.02f, 0.07f, false, false},
+    {"data3d\\ak_47_proxy.p3d", -0.045f, -0.03f, 0.04f, 0.055f, 0.005f, 0.03f, 0.09f, true, false},
+    {"data3d\\ak_74_proxy.p3d", -0.045f, -0.03f, 0.04f, 0.055f, 0.005f, 0.03f, 0.09f, true, false},
+    {"data3d\\ak_74_su_proxy.p3d", -0.055f, -0.04f, 0.055f, 0.075f, 0.01f, 0.04f, 0.08f, true, false},
+    {"data3d\\hkm5_sd6_proxy.p3d", -0.23f, -0.15f, 0.095f, 0.12f, 0.005f, 0.03f, 0.07f, false, false},
+    {"data3d\\m21_proxy.p3d", -0.08f, -0.01f, 0.055f, 0.095f, 0.005f, 0.03f, 0.09f, true, true},
+    {"steyr\\steyr.p3d", -0.08f, -0.04f, 0.055f, 0.09f, -0.045f, -0.01f, 0.09f, false, false},
+    {"g36a\\g36.p3d", 0.05f, 0.07f, 0.07f, 0.095f, 0.005f, 0.03f, 0.05f, false, false},
+    {"o\\guns\\fal.p3d", -0.075f, 0.0f, 0.06f, 0.095f, 0.005f, 0.056f, 0.08f, false, false},
+    {"o\\guns\\hkg3a4.p3d", -0.37f, -0.32f, 0.095f, 0.11f, -0.03f, -0.01f, 0.08f, false, false},
+    {"o\\guns\\uzi.p3d", 0.02f, 0.045f, 0.088f, 0.108f, -0.012f, 0.012f, 0.07f, false, false},
+    {"bizon\\bizon.p3d", 0.0f, 0.045f, 0.05f, 0.065f, 0.0f, 0.025f, 0.08f, true, false},
+    {"o\\guns\\sa61skorpion.p3d", 0.05f, 0.068f, 0.068f, 0.08f, -0.012f, 0.016f, 0.05f, true, false},
+    {"o_wp\\ingram.p3d", -0.012f, 0.005f, 0.06f, 0.075f, -0.016f, 0.0f, 0.06f, true, false},
+    {"data3d\\svd_dragunov_proxy.p3d", 0, 0, 0, 0, 0, 0, 0.09f, true, false, false, "vr\\vr_handle_svd.p3d", {-0.085f, 0.056f, 0.016f}},
+    {"data3d\\ak_47_v58_proxy.p3d", 0, 0, 0, 0, 0, 0, 0.08f, false, false, false, "vr\\vr_handle_vz58.p3d", {-0.04f, 0.045f, 0.014f}},
+    // Pistols: the slide is merged with the frame, so it is every face in the box.
+    {"o\\guns\\beretta92f.p3d", -0.125f, 0.11f, 0.036f, 0.07f, -0.04f, 0.04f, 0.05f, true, true, true},
+    {"o\\guns\\cz75.p3d", -0.125f, 0.11f, 0.034f, 0.07f, -0.04f, 0.04f, 0.05f, true, true, true},
+    {"o\\guns\\glock17.p3d", -0.12f, 0.11f, 0.035f, 0.07f, -0.04f, 0.04f, 0.05f, true, true, true},
+    {"o_wp\\glock17sil.p3d", -0.0985f, 0.11f, 0.035f, 0.07f, -0.04f, 0.04f, 0.05f, true, true, true},
+    {"o\\guns\\tokarevt33.p3d", -0.125f, 0.105f, 0.033f, 0.075f, -0.04f, 0.04f, 0.05f, true, true, true},
 };
+
+// The ejection port on the weapon's right side (x front to rear, y bottom to
+// top, in the first-person level).  The models have no bolt: it is painted on
+// the receiver, so a port of ours opens there and a carrier of ours runs back
+// across it with the handle.
+struct VRWeaponPort
+{
+    const char* model;
+    float x0, x1, y0, y1;
+    bool dustCover = false; // a hinged cover: it opens with the bolt and stays open
+};
+
+// Not the M21 (its operating rod moves in plain sight) nor the Skorpion (it
+// ejects upwards, its bolt knobs move).
+const VRWeaponPort kVRWeaponPorts[] = {
+    {"data3d\\m16_proxy.p3d", -0.03f, 0.0625f, 0.046f, 0.067f, true},
+    {"data3d\\xm-177e2_proxy.p3d", -0.03f, 0.0625f, 0.046f, 0.067f, true},
+    {"xms\\xms.p3d", -0.03f, 0.0625f, 0.046f, 0.067f, true},
+    {"data3d\\ak_47_proxy.p3d", -0.045f, 0.041f, 0.042f, 0.067f},
+    {"data3d\\ak_47_v58_proxy.p3d", -0.045f, 0.041f, 0.042f, 0.067f},
+    {"data3d\\ak_74_proxy.p3d", -0.045f, 0.041f, 0.042f, 0.067f},
+    {"data3d\\ak_74_su_proxy.p3d", -0.045f, 0.032f, 0.061f, 0.079f},
+    {"data3d\\hkm5_sd6_proxy.p3d", -0.005f, 0.065f, 0.07f, 0.088f},
+    {"data3d\\svd_dragunov_proxy.p3d", -0.09f, -0.005f, 0.055f, 0.072f},
+    {"steyr\\steyr.p3d", 0.225f, 0.3f, 0.072f, 0.085f},
+    {"g36a\\g36.p3d", -0.031f, 0.0515f, 0.075f, 0.0885f},
+    {"o\\guns\\fal.p3d", -0.09f, -0.02f, 0.066f, 0.079f},
+    {"o\\guns\\hkg3a4.p3d", -0.05f, 0.03f, 0.072f, 0.095f},
+    {"o\\guns\\uzi.p3d", 0.01f, 0.06f, 0.067f, 0.085f},
+    {"bizon\\bizon.p3d", 0.03f, 0.095f, 0.05f, 0.064f},
+    {"o_wp\\ingram.p3d", 0.04f, 0.08f, 0.045f, 0.057f},
+};
+
+const VRWeaponPort* FindVRWeaponPort(const LODShapeWithShadow* shape)
+{
+    for (const VRWeaponPort& p : kVRWeaponPorts)
+        if (strcmpi(shape->GetName(), p.model) == 0)
+            return &p;
+    return nullptr;
+}
+
+// How far the surface reaches to the right at (x, y), skipping some faces.
+bool VRSurfaceRight(const Shape* shape, float x, float y, const AutoArray<VertexIndex>& skip, float& right)
+{
+    bool found = false;
+    for (int f = 0; f < shape->NFaces(); f++)
+    {
+        bool skipped = false;
+        for (int i = 0; i < skip.Size() && !skipped; i++)
+            skipped = skip[i] == f;
+        const Poly& poly = shape->Face(shape->FaceIndexToOffset(f));
+        if (skipped || poly.N() < 3 || (poly.Special() & (IsHidden | IsHiddenProxy)))
+            continue;
+        const Vector3 a = shape->Pos(poly.GetVertex(0));
+        for (int k = 1; k + 1 < poly.N(); k++)
+        {
+            const Vector3 b = shape->Pos(poly.GetVertex(k)), c = shape->Pos(poly.GetVertex(k + 1));
+            const float det = (b.X() - a.X()) * (c.Y() - a.Y()) - (c.X() - a.X()) * (b.Y() - a.Y());
+            if (fabsf(det) < 1e-9f)
+                continue;
+            const float u = ((x - a.X()) * (c.Y() - a.Y()) - (c.X() - a.X()) * (y - a.Y())) / det;
+            const float v = ((b.X() - a.X()) * (y - a.Y()) - (x - a.X()) * (b.Y() - a.Y())) / det;
+            if (u < 0.0f || v < 0.0f || u + v > 1.0f)
+                continue;
+            const float z = a.Z() + u * (b.Z() - a.Z()) + v * (c.Z() - a.Z());
+            right = found ? floatMax(right, z) : z;
+            found = true;
+        }
+    }
+    return found;
+}
 
 const VRWeaponBoltBox* FindVRWeaponBoltBox(const LODShapeWithShadow* shape)
 {
@@ -1142,6 +1464,15 @@ struct VRWeaponMagInfo
     int boltLevel = -1;     // the level with the charging handle, -1 = none
     Vector3 boltCentre = VZero;
     float boltTravel = 0.0f;
+    bool boltReciprocates = false;
+    bool boltLocksBack = false;
+    const char* boltPart = nullptr; // our own model for it, the weapon has none
+    bool plate = false;     // the selection is only the base plate of the magazine
+    bool hasPort = false;   // ejection port of ours
+    bool dustCover = false; // and a cover on it (VRWeaponPort)
+    float portX0 = 0, portX1 = 0, portY0 = 0, portY1 = 0, portZ = 0;
+    bool hasMouth = false;  // its open top was found
+    Matrix4 mouth;          // our top -> weapon model space
 };
 VRWeaponMagInfo s_weaponMags[32];
 
@@ -1206,13 +1537,33 @@ class VRMagazineOnly
     }
     bool Valid() const { return _shape != nullptr; }
 };
+
+void VRDrawPart(Object* owner, const char* name, const Matrix4& transform, float z2, const LightList& lights)
+{
+    LODShapeWithShadow* part = VRHeldShape(name);
+    Shape* shape = part ? part->LevelOpaque(0) : nullptr;
+    if (!shape)
+        return;
+    const int spec = shape->Special() | NoDropdown | FogDisabled;
+    shape->PrepareTextures(z2, spec);
+    shape->Draw(owner, lights, ClipAll, spec, transform, transform.InverseGeneral());
+}
+
+// Closes the open top of a magazine piece: follower, and rounds unless empty.
+void VRDrawMagazineMouth(Object* owner, const VRWeaponMagInfo& info, const Matrix4& transform, bool rounds, float z2,
+                         const LightList& lights)
+{
+    if (!info.hasMouth)
+        return;
+    VRDrawPart(owner, rounds ? "vr\\vr_mag_top.p3d" : "vr\\vr_mag_top_empty.p3d", transform * info.mouth, z2, lights);
+}
 } // namespace
 
-bool VRDrawWeaponMagazine(Object* owner, LODShapeWithShadow* weapon, const Matrix4& magFrame, float z2,
+bool VRDrawWeaponMagazine(Object* owner, LODShapeWithShadow* weapon, const Matrix4& magFrame, bool rounds, float z2,
                           const LightList& lights)
 {
     const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
-    if (!info)
+    if (!info || info->plate)
         return false;
     VRMagazineOnly only(weapon, info->level);
     if (!only.Valid())
@@ -1222,6 +1573,7 @@ bool VRDrawWeaponMagazine(Object* owner, LODShapeWithShadow* weapon, const Matri
     const int spec = shape->Special() | NoDropdown | FogDisabled;
     shape->PrepareTextures(z2, spec);
     shape->Draw(owner, lights, ClipAll, spec, transform, transform.InverseScaled());
+    VRDrawMagazineMouth(owner, *info, transform, rounds, z2, lights);
     return true;
 }
 
@@ -1245,9 +1597,100 @@ bool VRWeaponBolt(const LODShapeWithShadow* weapon, int level, Vector3& centre, 
     return true;
 }
 
+bool VRWeaponBoltMotion(const LODShapeWithShadow* weapon, bool& reciprocates, bool& locksBack)
+{
+    const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
+    if (!info || info->boltLevel < 0)
+        return false;
+    reciprocates = info->boltReciprocates;
+    locksBack = info->boltLocksBack;
+    return true;
+}
+
+bool VRWeaponBoltIsPart(const LODShapeWithShadow* weapon)
+{
+    const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
+    return info && info->boltPart;
+}
+
+bool VRWeaponHasDustCover(const LODShapeWithShadow* weapon)
+{
+    const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
+    return info && info->hasPort && info->dustCover;
+}
+
+// The port and the bolt carrier in it, the carrier's front edge "back" metres
+// behind the port's front end.  Both parts are made kVRPortLength by
+// kVRPortHeight (resources/vr), the carrier with its rear end at its origin.
+// A weapon with a dust cover (cover: 0 shut .. 1 open) shows its bolt and
+// round carrier instead, laid in lengths from the front and cut at the port's
+// rear edge, so they slide out of sight as they do into the receiver.
+void VRDrawWeaponPort(Object* owner, const LODShapeWithShadow* weapon, const Matrix4& weaponFrame, float back,
+                      float cover, float z2, const LightList& lights)
+{
+    constexpr float kVRPortLength = 0.08f;
+    constexpr float kVRPortHeight = 0.025f;
+    const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
+    if (!info || !info->hasPort)
+        return;
+    const float length = info->portX1 - info->portX0;
+    const float height = (info->portY1 - info->portY0) / kVRPortHeight;
+    const float middle = (info->portY0 + info->portY1) * 0.5f;
+    VRDrawPart(owner, "vr\\vr_port.p3d",
+               weaponFrame * Matrix4(MTranslation, Vector3((info->portX0 + info->portX1) * 0.5f, middle, info->portZ)) *
+                   Matrix4(MScale, length / kVRPortLength, height, 1.0f),
+               z2, lights);
+    if (info->dustCover)
+    {
+        constexpr float kVRBoltHeadLength = 0.018f;
+        constexpr float kVRCarrierSegment = 0.012f;
+        constexpr float kVRCoverOpen = 165.0f * 3.14159265f / 180.0f;
+        float at = info->portX0 + back;
+        for (int i = 0; info->portX1 - at > 0.001f; i++)
+        {
+            const float size = i == 0 ? kVRBoltHeadLength : kVRCarrierSegment;
+            const char* part = i == 0  ? "vr\\vr_bolt_head.p3d"
+                               : i < 3 ? "vr\\vr_carrier_plain.p3d"
+                                       : "vr\\vr_carrier_notched.p3d";
+            const float shown = floatMin(size, info->portX1 - at);
+            VRDrawPart(owner, part,
+                       weaponFrame * Matrix4(MTranslation, Vector3(at, middle, info->portZ)) *
+                           Matrix4(MScale, shown / size, height, 1.0f),
+                       z2, lights);
+            at += size;
+        }
+        VRDrawPart(owner, "vr\\vr_dustcover.p3d",
+                   weaponFrame *
+                       Matrix4(MTranslation,
+                               Vector3((info->portX0 + info->portX1) * 0.5f, info->portY0, info->portZ + 0.0025f)) *
+                       Matrix4(MRotationX, cover * kVRCoverOpen) * Matrix4(MScale, length / kVRPortLength, height, 1.0f),
+                   z2, lights);
+        return;
+    }
+    const float left = length - back;
+    if (left > 0.002f)
+        VRDrawPart(owner, "vr\\vr_carrier.p3d",
+                   weaponFrame * Matrix4(MTranslation, Vector3(info->portX1, middle, info->portZ)) *
+                       Matrix4(MScale, left / kVRPortLength, height, 1.0f),
+                   z2, lights);
+}
+
 void VRDrawWeaponBolt(Object* owner, LODShapeWithShadow* weapon, int level, const Matrix4& weaponFrame, float back,
                       float z2, const LightList& lights)
 {
+    const VRWeaponMagInfo* info = FindVRWeaponMag(weapon);
+    if (info && info->boltPart)
+    {
+        LODShapeWithShadow* part = VRHeldShape(info->boltPart);
+        Shape* shape = part ? part->LevelOpaque(0) : nullptr;
+        if (!shape)
+            return;
+        const Matrix4 transform = weaponFrame * Matrix4(MTranslation, info->boltCentre + Vector3(back, 0, 0));
+        const int spec = shape->Special() | NoDropdown | FogDisabled;
+        shape->PrepareTextures(z2, spec);
+        shape->Draw(owner, lights, ClipAll, spec, transform, transform.InverseScaled());
+        return;
+    }
     VRMagazineOnly only(weapon, level, "vr_bolt");
     if (!only.Valid())
         return;
@@ -1274,6 +1717,8 @@ class VRDroppedMagazine : public Vehicle
     Matrix4 _frame; // magazine frame, world
     Matrix4 _toModel = MIdentity; // magazine frame -> drawn model
     int _level = -1; // weapon level drawn, -1 = stand-in model
+    VRWeaponMagInfo _weaponMag;
+    bool _rounds = false; // any left in it
     Vector3 _velocity;
     Vector3 _spin; // rad/s about the frame axes
     float _halfThickness;
@@ -1286,19 +1731,23 @@ class VRDroppedMagazine : public Vehicle
     static constexpr int kMaxDropped = 12;
     static constexpr float kLifetime = 90.0f;
 
-    VRDroppedMagazine(LODShapeWithShadow* shape, const VRWeaponMagInfo* weaponMag, const Matrix4& pose,
-                      Vector3Par velocity)
-        : base(shape, VehicleTypes.New("FxCartridge"), -1), _frame(pose), _velocity(velocity)
+    VRDroppedMagazine(LODShapeWithShadow* shape, const VRWeaponMagInfo* weaponMag, float standInScale, bool rounds,
+                      const Matrix4& pose, Vector3Par velocity)
+        : base(shape, VehicleTypes.New("FxCartridge"), -1), _frame(pose), _rounds(rounds), _velocity(velocity)
     {
         _frame.Orthogonalize();
         if (weaponMag)
         {
+            _weaponMag = *weaponMag;
             _toModel = WeaponToMagazineFrame(*weaponMag);
             _level = weaponMag->level;
             _halfThickness = weaponMag->halfThin;
         }
         else
-            _halfThickness = shape ? floatMax(-shape->Min().Y(), 0.005f) : 0.012f;
+        {
+            _toModel = Matrix4(MScale, standInScale);
+            _halfThickness = (shape ? floatMax(-shape->Min().Y(), 0.005f) : 0.012f) * standInScale;
+        }
         _spin = Vector3(GRandGen.RandomValue() - 0.5f, GRandGen.RandomValue() - 0.5f, GRandGen.RandomValue() - 0.5f) * 6.0f;
         Place();
     }
@@ -1316,6 +1765,14 @@ class VRDroppedMagazine : public Vehicle
         VRMagazineOnly only(GetShape(), _level);
         if (only.Valid())
             base::Draw(_level, clipFlags, pos);
+    }
+
+    void DrawProxies(int level, ClipFlags clipFlags, const Matrix4& transform, const Matrix4& invTransform, float dist2,
+                     float z2, const LightList& lights) override
+    {
+        base::DrawProxies(level, clipFlags, transform, invTransform, dist2, z2, lights);
+        if (_level >= 0)
+            VRDrawMagazineMouth(this, _weaponMag, transform, _rounds, z2, lights);
     }
 
     void Simulate(float deltaT, SimulationImportance prec) override
@@ -1363,7 +1820,7 @@ class VRDroppedMagazine : public Vehicle
 };
 } // namespace
 
-void Man::VRDropMagazine(const MagazineType* type)
+void Man::VRDropMagazine(const MagazineType* type, bool rounds)
 {
     Matrix4 pose;
     Vector3 velocity;
@@ -1374,6 +1831,8 @@ void Man::VRDropMagazine(const MagazineType* type)
     if (_currentWeapon >= 0 && GetMagazineSlot(_currentWeapon)._weapon)
         weapon = GetMagazineSlot(_currentWeapon)._weapon->_model;
     const VRWeaponMagInfo* weaponMag = FindVRWeaponMag(weapon);
+    if (weaponMag && weaponMag->plate)
+        weaponMag = nullptr;
     LODShapeWithShadow* shape = weaponMag ? weapon : VRMagazineModel(type);
     if (!shape)
         return;
@@ -1391,7 +1850,7 @@ void Man::VRDropMagazine(const MagazineType* type)
     }
     if (count >= VRDroppedMagazine::kMaxDropped && oldest)
         oldest->SetDelete();
-    GWorld->AddCloudlet(new VRDroppedMagazine(shape, weaponMag, pose, velocity + Speed()));
+    GWorld->AddCloudlet(new VRDroppedMagazine(shape, weaponMag, VRMagazineModelScale(type), rounds, pose, velocity + Speed()));
 }
 
 // VR (M6): finds the weapon's built-in magazine and makes it a selection
@@ -1418,6 +1877,7 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
     const VRWeaponBoltBox* bolt = FindVRWeaponBoltBox(weaponShape);
     VRWeaponMagInfo info;
     info.shape = weaponShape;
+    info.plate = box->plate;
     for (int level = 0; level < weaponShape->NLevels(); level++)
     {
         const float res = weaponShape->Resolution(level);
@@ -1447,8 +1907,48 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
                     }
             }
         };
+        // The faces of the pieces wholly inside a box, for parts merged with
+        // the rest of the mesh.
+        auto facesInBox = [&](float x0, float x1, float y0, float y1, float z0, float z1)
+        {
+            MeshPiece sub;
+            sub.min = Vector3(1e10f, 1e10f, 1e10f);
+            sub.max = Vector3(-1e10f, -1e10f, -1e10f);
+            for (int i = 0; i < pieces.Size(); i++)
+                for (int fi = 0; fi < pieces[i].faces.Size(); fi++)
+                {
+                    const int f = pieces[i].faces[fi];
+                    const Poly& poly = lShape->Face(lShape->FaceIndexToOffset(f));
+                    bool inside = true;
+                    for (int k = 0; k < poly.N(); k++)
+                    {
+                        const Vector3 v = lShape->Pos(poly.GetVertex(k));
+                        inside = inside && v.X() >= x0 && v.X() <= x1 && v.Y() >= y0 && v.Y() <= y1 && v.Z() >= z0 && v.Z() <= z1;
+                    }
+                    if (!inside)
+                        continue;
+                    sub.faces.Add(f);
+                    for (int k = 0; k < poly.N(); k++)
+                    {
+                        const Vector3 v = lShape->Pos(poly.GetVertex(k));
+                        for (int a = 0; a < 3; a++)
+                        {
+                            sub.min[a] = floatMin(sub.min[a], v[a]);
+                            sub.max[a] = floatMax(sub.max[a], v[a]);
+                        }
+                    }
+                }
+            return sub;
+        };
         Vector3 min(1e10f, 1e10f, 1e10f), max(-1e10f, -1e10f, -1e10f);
-        for (int i = 0; i < pieces.Size(); i++)
+        if (box->plate)
+        {
+            const MeshPiece sub = facesInBox(box->x0, box->x1, box->y0, box->y1, -box->z, box->z);
+            min = sub.min;
+            max = sub.max;
+            addFaces(sub, faces, points);
+        }
+        for (int i = 0; i < pieces.Size() && !box->plate; i++)
         {
             const MeshPiece& p = pieces[i];
             if (p.min.X() < box->x0 || p.max.X() > box->x1 || p.min.Y() < box->y0 || p.max.Y() > box->y1 ||
@@ -1466,7 +1966,14 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
         AutoArray<VertexIndex> boltFaces;
         AutoArray<SelInfo> boltPoints;
         Vector3 boltMin(1e10f, 1e10f, 1e10f), boltMax(-1e10f, -1e10f, -1e10f);
-        if (bolt && level == firstPerson)
+        if (bolt && level == firstPerson && bolt->byFace)
+        {
+            const MeshPiece sub = facesInBox(bolt->x0, bolt->x1, bolt->y0, bolt->y1, bolt->z0, bolt->z1);
+            boltMin = sub.min;
+            boltMax = sub.max;
+            addFaces(sub, boltFaces, boltPoints);
+        }
+        else if (bolt && level == firstPerson)
         {
             for (int i = 0; i < pieces.Size(); i++)
             {
@@ -1488,6 +1995,29 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
                      static_cast<const char*>(weaponShape->GetName()), level, res);
             continue;
         }
+        Matrix4 mouth;
+        const bool hasMouth = !box->plate && VRFindMagazineMouth(lShape, faces, mouth);
+        const VRWeaponPort* port = FindVRWeaponPort(weaponShape);
+        if (port && level == firstPerson)
+        {
+            const float xs[5] = {port->x0, port->x1, port->x0, port->x1, (port->x0 + port->x1) * 0.5f};
+            const float ys[5] = {port->y0, port->y0, port->y1, port->y1, (port->y0 + port->y1) * 0.5f};
+            float right = -1.0f;
+            for (int i = 0; i < 5; i++)
+            {
+                float z;
+                if (VRSurfaceRight(lShape, xs[i], ys[i], boltFaces, z))
+                    right = floatMax(right, z);
+            }
+            info.hasPort = right > 0.0f;
+            info.dustCover = port->dustCover;
+            info.portX0 = port->x0;
+            info.portX1 = port->x1;
+            info.portY0 = port->y0;
+            info.portY1 = port->y1;
+            info.portZ = right;
+            LOG_INFO(Graphics, "VR: {}: ejection port at z {:.3f}", static_cast<const char*>(weaponShape->GetName()), right);
+        }
         NamedSelection sel("vr_magazine", points.Data(), points.Size(), faces.Data(), faces.Size());
         sel.SetNeedsSections(true);
         lShape->ReleaseVBuffer();
@@ -1500,9 +2030,22 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
             info.boltLevel = level;
             info.boltCentre = (boltMin + boltMax) * 0.5f;
             info.boltTravel = bolt->travel;
+            info.boltReciprocates = bolt->reciprocates;
+            info.boltLocksBack = bolt->locksBack;
             LOG_INFO(Graphics, "VR: {} level {}: charging handle = {} faces at x {:.3f} y {:.3f} z {:.3f}, travel {:.2f}",
                      static_cast<const char*>(weaponShape->GetName()), level, boltFaces.Size(), info.boltCentre.X(),
                      info.boltCentre.Y(), info.boltCentre.Z(), info.boltTravel);
+        }
+        else if (bolt && level == firstPerson && bolt->part)
+        {
+            info.boltLevel = level;
+            info.boltCentre = Vector3(bolt->partAt[0], bolt->partAt[1], bolt->partAt[2]);
+            info.boltTravel = bolt->travel;
+            info.boltReciprocates = bolt->reciprocates;
+            info.boltLocksBack = bolt->locksBack;
+            info.boltPart = bolt->part;
+            LOG_INFO(Graphics, "VR: {} level {}: charging handle = {}", static_cast<const char*>(weaponShape->GetName()), level,
+                     bolt->part);
         }
         else if (bolt && level == firstPerson)
         {
@@ -1522,6 +2065,10 @@ bool VRPrepareWeaponMagazine(LODShapeWithShadow* weaponShape, const MagazineType
             info.level = level;
             info.centre = (min + max) * 0.5f;
             info.halfThin = floatMax((max.Z() - min.Z()) * 0.5f, 0.004f);
+            info.hasMouth = hasMouth;
+            info.mouth = mouth;
+            LOG_INFO(Graphics, "VR: {} level {}: magazine top {}", static_cast<const char*>(weaponShape->GetName()), level,
+                     hasMouth ? "closed with our part" : "not found");
         }
     }
     if (info.level < 0)
@@ -1557,6 +2104,15 @@ void VRShowWeaponMagazine(LODShapeWithShadow* weaponShape, int level, bool show,
         else
             ss.properties.OrSpecial(IsHidden);
     }
+}
+
+void VRLogOpenEdges(const Shape* shape, const MeshPiece& piece)
+{
+    AutoArray<Vector3> ends;
+    VROpenEdges(shape, piece.faces, ends);
+    for (int e = 0; e + 1 < ends.Size(); e += 2)
+        LOG_INFO(Graphics, "VRDUMP      open {:6.3f} {:6.3f} {:6.3f} - {:6.3f} {:6.3f} {:6.3f}", ends[e].X(), ends[e].Y(),
+                 ends[e].Z(), ends[e + 1].X(), ends[e + 1].Y(), ends[e + 1].Z());
 }
 
 // Test aid (CWR_VR_DUMP_WEAPONS=1): logs the mesh pieces of every weapon
@@ -1598,14 +2154,83 @@ void VRDumpWeaponPieces()
                 LOG_INFO(Graphics, "VRDUMP   {:2} {:3}f x {:6.3f}..{:6.3f} y {:6.3f}..{:6.3f} z {:6.3f}..{:6.3f} {}", i,
                          p.faces.Size(), p.min.X(), p.max.X(), p.min.Y(), p.max.Y(), p.min.Z(), p.max.Z(),
                          tex ? static_cast<const char*>(tex->GetName()) : "-");
+                const VRWeaponMagBox* box = FindVRWeaponMagBox(shape);
+                if (box && p.min.X() >= box->x0 && p.max.X() <= box->x1 && p.min.Y() >= box->y0 && p.max.Y() <= box->y1 &&
+                    p.min.Z() >= -box->z && p.max.Z() <= box->z)
+                    VRLogOpenEdges(lShape, p);
             }
         }
     }
 }
 
 // VR (M6): see SoldierOld.hpp; the gestures are in EngineGL33_VR.cpp.
+// The game's reload sound is one recording of the whole reload.  Each hand
+// gesture plays only its own part: the wave starts inside the file and is
+// stopped at the end of the part, with a short fade (the recording does not
+// go silent between the parts).
+void Man::VRPlayReloadSoundPart(int event, const MuzzleType* muzzle)
+{
+    float start = 0.0f, end = 0.0f, volume = 1.0f;
+    const SoundPars& pars = muzzle->_reloadMagazineSound;
+    const bool handgun = strstr(pars.name, "reload_gun") != nullptr;
+    if (pars.name.GetLength() == 0 || !GEngine->VRReloadSoundPart(event, handgun, start, end, volume))
+        return;
+    if (_vrSoundPart)
+        _vrSoundPart->Skip(10.0f); // past the end: stops it for good
+    _vrSoundFreq = pars.freq * (GRandGen.RandomValue() * 0.06f + 0.97f);
+    _vrSoundVolume = pars.vol * volume;
+    _vrSoundEnd = end;
+    _vrSoundPart = GSoundScene->OpenAndPlayOnce(pars.name, PositionModelToWorld(GetWeaponPoint(_currentWeapon)), Speed(),
+                                                _vrSoundVolume, _vrSoundFreq);
+    if (!_vrSoundPart)
+        return;
+    _vrSoundPart->Skip(start);
+    GSoundScene->AddSound(_vrSoundPart);
+    LOG_INFO(Graphics, "VR: reload sound {:.2f}-{:.2f} of {}", start, end, static_cast<const char*>(pars.name));
+}
+
+// How far back the bolt is drawn, 0 to 1: pulled by the hand, held by the
+// empty magazine, or cycling after a shot (back and forward in 0.1 s).
+float Man::VRBoltPosition(const LODShapeWithShadow* weapon, bool carrier) const
+{
+    float position = GEngine->VRChargePull();
+    bool reciprocates = false, locksBack = false;
+    if (!VRWeaponBoltMotion(weapon, reciprocates, locksBack))
+        return position;
+    if (locksBack && _vrBoltLocked)
+        return 1.0f;
+    if (reciprocates || carrier)
+    {
+        constexpr float kCycle = 0.1f;
+        const float age = Glob.uiTime - _mGunFireTime;
+        if (age >= 0.0f && age < kCycle)
+            position = floatMax(position, 1.0f - fabsf(age * 2.0f / kCycle - 1.0f));
+    }
+    return position;
+}
+
+void Man::VRReloadSoundStep()
+{
+    if (!_vrSoundPart)
+        return;
+    constexpr float kFade = 0.03f;
+    const float offset = _vrSoundPart->GetCurrentOffsetSeconds();
+    const float left = _vrSoundEnd - offset;
+    if (left <= 0.0f || _vrSoundPart->IsTerminated())
+    {
+        LOG_INFO(Graphics, "VR: reload sound stopped at {:.2f}", offset);
+        _vrSoundPart->Skip(10.0f);
+        _vrSoundPart = nullptr;
+    }
+    else if (left < kFade)
+    {
+        _vrSoundPart->SetVolume(_vrSoundVolume * left / kFade, _vrSoundFreq);
+    }
+}
+
 void Man::VRReloadStep()
 {
+    VRReloadSoundStep();
     static bool s_dumped = false;
     if (!s_dumped && std::getenv("CWR_VR_DUMP_WEAPONS"))
     {
@@ -1652,7 +2277,7 @@ void Man::VRReloadStep()
                         _vrChambered = false; // fired dry: the bolt is locked back
                     Ref<Magazine> keep = loaded;
                     clearSlots(loaded);
-                    VRDropMagazine(loaded->_type);
+                    VRDropMagazine(loaded->_type, loaded->_ammo > 0);
                     RemoveMagazine(loaded);
                     Foundation::GlobalShowMessage(1500, "Magazine dropped (%d rounds)", static_cast<int>(keep->_ammo));
                 }
@@ -1690,7 +2315,7 @@ void Man::VRReloadStep()
                 const bool fits = index >= 0 && muzzle->CanUse(_vrHandMag->_type) && !current._magazine;
                 const bool done = fits && ReloadMagazineTimed(_currentWeapon, index, true);
                 if (done)
-                    PlayReloadMagazineSound(_currentWeapon, muzzle);
+                    VRPlayReloadSoundPart(event, muzzle);
                 if (done && GEngine->VRChargeEveryMagazine())
                     _vrChambered = false;
                 LOG_INFO(Graphics, "VR: reload insert {} ({} rounds)", done ? "done" : "refused",
@@ -1715,12 +2340,17 @@ void Man::VRReloadStep()
                     Ref<Magazine> dropped = _vrHandMag;
                     _vrHandMag = nullptr;
                     clearSlots(dropped);
-                    VRDropMagazine(dropped->_type);
+                    VRDropMagazine(dropped->_type, dropped->_ammo > 0);
                     RemoveMagazine(dropped);
                 }
                 break;
+            case Engine::VRReloadBoltBack:
+                VRPlayReloadSoundPart(event, muzzle);
+                break;
             case Engine::VRReloadCharge:
+                VRPlayReloadSoundPart(event, muzzle);
                 _vrChambered = loaded && loaded->_ammo > 0;
+                _vrBoltLocked = false;
                 LOG_INFO(Graphics, "VR: reload charge, chambered {}", _vrChambered);
                 if (_vrChambered)
                     Foundation::GlobalShowMessage(1000, "Charged");

@@ -20,9 +20,11 @@
 // vehicle).  Controllers reach the game as a virtual gamepad (VRGamepad).
 
 #include <PoseidonGL33/EngineGL33.hpp>
+#include <PoseidonGL33/GL33BindCache.hpp>
 #include <Poseidon/Dev/Debug/DebugOverlay.hpp>
 #include <Poseidon/Foundation/Platform/AppConfig.hpp>
 #include <Poseidon/Graphics/Core/GLClear.hpp>
+#include <Poseidon/Graphics/Core/GLDepthStencilState.hpp>
 #include <Poseidon/Graphics/Core/GLPipelineState.hpp>
 #include <Poseidon/Input/InputSubsystem.hpp>
 #include <Poseidon/World/Scene/Camera/Camera.hpp>
@@ -31,6 +33,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <cstdlib>
 
 extern void SDLInput_GamepadDebug(char* buf, int size); // InputProcessingSdl.cpp
@@ -62,7 +65,8 @@ struct EyeTarget
     int samples = 0;
 };
 
-EyeTarget s_eyes[2];
+EyeTarget s_eyes[3]; // left, right, the view through a telescopic sight
+constexpr int kScopeTarget = 2;
 PoseidonVR::StereoFrame s_frame;
 bool s_mirror = false;
 
@@ -321,6 +325,125 @@ Matrix4 MagazineInWell(const Matrix4& weapon)
     m.SetPosition(weapon.Position() + weapon.Direction() * cfg.wellForward - weapon.DirectionUp() * cfg.wellDown);
     return m;
 }
+// Telescopic sight of the weapon in hand (Engine::VRSetScope).  With the head
+// at it the frame starts with one more scene pass, the view along the sight,
+// into s_scopeTexture; each eye then draws the rear lens from that image.
+bool s_scopeOn = false;
+Vector3 s_scopeEyepiece(0, 0, 0); // in the weapon's frame (x aside, y up, z barrel)
+float s_scopeRadius = 0.02f;
+float s_scopeFovMin = 0.0f, s_scopeFovMax = 0.0f;
+float s_scopeFov = 0.0f;   // the zoom selected
+int s_scopePasses = 0;     // 1 = this frame has the sight's pass, before the eyes
+bool s_inScopePass = false;
+int s_scopeSavedW = 0, s_scopeSavedH = 0; // window size while 2D draws on the image
+GLuint s_scopeTexture = 0, s_scopeFbo = 0;
+int s_scopeTextureSize = 0;
+GLuint s_lensProgram = 0, s_lensVao = 0;
+bool s_lensFailed = false;
+GLint s_lensCentre = -1, s_lensAside = -1, s_lensUp = -1, s_lensProj = -1, s_lensDepth = -1, s_lensEye = -1,
+      s_lensRadius = -1, s_lensOptics = -1, s_lensLive = -1;
+
+// A disc on the rear lens.  What the eye sees through it depends on the ray's
+// direction only (the image is at infinity), and the ray has to pass the exit
+// pupil, scope_relief behind the lens.
+const char* const kLensVS = R"(#version 330 core
+uniform vec3 uCentre, uAside, uUp; // view space, aside and up scaled by the radius
+uniform vec4 uProj;                // x scale, x per z, y scale, y per z
+uniform vec2 uDepth;               // z scale, z offset
+out vec2 vDisc;
+void main()
+{
+    const vec2 corners[4] = vec2[4](vec2(-1, -1), vec2(1, -1), vec2(-1, 1), vec2(1, 1));
+    vDisc = corners[gl_VertexID];
+    vec3 p = uCentre + uAside * vDisc.x + uUp * vDisc.y;
+    gl_Position = vec4(uProj.x * p.x + uProj.y * p.z, uProj.z * p.y + uProj.w * p.z, uDepth.x * p.z + uDepth.y, p.z);
+}
+)";
+
+const char* const kLensFS = R"(#version 330 core
+uniform sampler2D uImage;
+uniform vec3 uEye;    // the eye in the sight's frame (x aside, y up, z forward)
+uniform float uRadius;
+uniform vec3 uOptics; // apparent half size (tan), eye relief, exit pupil radius
+uniform float uLive;  // 0 = no image this frame: dark glass
+in vec2 vDisc;
+out vec4 colour;
+void main()
+{
+    float r = length(vDisc);
+    if (r > 1.0)
+        discard;
+    vec2 onLens = vDisc * uRadius;
+    vec3 ray = vec3(onLens, 0.0) - uEye;
+    vec2 slope = ray.xy / ray.z;
+    vec2 atPupil = onLens - slope * uOptics.y;
+    float pupil = 1.0 - smoothstep(uOptics.z * 0.7, uOptics.z * 1.3, length(atPupil));
+    float field = 1.0 - smoothstep(0.94, 1.0, length(slope) / uOptics.x);
+    vec3 image = texture(uImage, 0.5 + 0.5 * slope / uOptics.x, -1.0).rgb; // sharp: a hairline reticle must survive
+    vec3 glass = vec3(0.012, 0.016, 0.03) + 0.05 * vec3(0.5, 0.6, 1.0) * smoothstep(0.2, 1.0, vDisc.y * 0.5 + 0.5);
+    colour = vec4(mix(glass, image, pupil * field * uLive), 1.0);
+}
+)";
+
+GLuint CompileLensShader(GLenum type, const char* source)
+{
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok)
+    {
+        char log[1024];
+        glGetShaderInfoLog(shader, sizeof(log), nullptr, log);
+        LOG_ERROR(Graphics, "VR: lens shader: {}", log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+bool EnsureLensProgram()
+{
+    if (s_lensProgram || s_lensFailed)
+        return s_lensProgram != 0;
+    const GLuint vs = CompileLensShader(GL_VERTEX_SHADER, kLensVS);
+    const GLuint fs = CompileLensShader(GL_FRAGMENT_SHADER, kLensFS);
+    GLint linked = 0;
+    if (vs && fs)
+    {
+        s_lensProgram = glCreateProgram();
+        glAttachShader(s_lensProgram, vs);
+        glAttachShader(s_lensProgram, fs);
+        glLinkProgram(s_lensProgram);
+        glGetProgramiv(s_lensProgram, GL_LINK_STATUS, &linked);
+    }
+    if (vs)
+        glDeleteShader(vs);
+    if (fs)
+        glDeleteShader(fs);
+    if (!linked)
+    {
+        LOG_ERROR(Graphics, "VR: lens program failed to build, sights show no image");
+        if (s_lensProgram)
+            glDeleteProgram(s_lensProgram);
+        s_lensProgram = 0;
+        s_lensFailed = true;
+        return false;
+    }
+    s_lensCentre = glGetUniformLocation(s_lensProgram, "uCentre");
+    s_lensAside = glGetUniformLocation(s_lensProgram, "uAside");
+    s_lensUp = glGetUniformLocation(s_lensProgram, "uUp");
+    s_lensProj = glGetUniformLocation(s_lensProgram, "uProj");
+    s_lensDepth = glGetUniformLocation(s_lensProgram, "uDepth");
+    s_lensEye = glGetUniformLocation(s_lensProgram, "uEye");
+    s_lensRadius = glGetUniformLocation(s_lensProgram, "uRadius");
+    s_lensOptics = glGetUniformLocation(s_lensProgram, "uOptics");
+    s_lensLive = glGetUniformLocation(s_lensProgram, "uLive");
+    glGenVertexArrays(1, &s_lensVao);
+    return true;
+}
+
 // Short-lived confirmation on the HUD ("Magazine out", "Charged", ...).
 const char* s_flashText = nullptr;
 std::chrono::steady_clock::time_point s_flashUntil;
@@ -662,11 +785,10 @@ void UpdateWeaponPose()
         // for the magazine (UpdateReload), not the fore-end.
         const Vector3 well = centre + orient.Direction() * cfg.wellForward - orient.DirectionUp() * cfg.wellDown;
         const Vector3 supportPos = TrackedToWorld(support.position);
-        // Nor when the handle waits for the hand and is nearer (some sit far
-        // forward).
+        // Nor when the handle waits for the hand and is within reach (on the
+        // MP5 and G3 it sits at the fore-end; the weapon cannot fire yet).
         const float toHandle = (supportPos - ChargeHandle(orient, centre)).Size();
-        const bool forHandle = !s_chambered && s_magLoaded && toHandle < cfg.chargeRadius &&
-                               toHandle < (supportPos - foreEnd).Size();
+        const bool forHandle = !s_chambered && s_magLoaded && toHandle < cfg.chargeRadius;
         s_foreGrip = !forHandle && (supportPos - foreEnd).Size() < cfg.foreEndRadius &&
                      (supportPos - foreEnd).Size() < (supportPos - well).Size();
     }
@@ -685,6 +807,75 @@ void UpdateWeaponPose()
     s_weaponWorld.SetPosition(hand + orient.Direction() * cfg.weaponForward + orient.DirectionUp() * cfg.weaponUp +
                               orient.DirectionAside() * cfg.weaponRight);
     s_weaponValid = true;
+}
+
+// Centre of the sight's rear lens, a little behind the tube's own end.
+Vector3 ScopeLensCentre()
+{
+    const Matrix4& w = s_weaponWorld;
+    return w.Position() + w.DirectionAside() * s_scopeEyepiece[0] + w.DirectionUp() * s_scopeEyepiece[1] +
+           w.Direction() * (s_scopeEyepiece[2] - 0.002f);
+}
+
+// The view through the sight costs a scene pass: only with the head at it.
+// Last frame's weapon is near enough to decide that.
+bool ScopeViewWanted()
+{
+    if (!s_scopeOn || !s_weaponValid || s_uiInput || s_lensFailed)
+        return false;
+    const float centre[3] = {(s_frame.eyes[0].position[0] + s_frame.eyes[1].position[0]) * 0.5f,
+                             (s_frame.eyes[0].position[1] + s_frame.eyes[1].position[1]) * 0.5f,
+                             (s_frame.eyes[0].position[2] + s_frame.eyes[1].position[2]) * 0.5f};
+    const Vector3 toHead = TrackedToWorld(centre) - ScopeLensCentre();
+    return toHead.Size() < PoseidonVR::VRSession::Instance().Config().scopeRange &&
+           toHead.DotProduct(s_weaponWorld.Direction()) < 0.0f;
+}
+
+bool EnsureScopeImage(int samples)
+{
+    const int size = std::clamp(static_cast<int>(PoseidonVR::VRSession::Instance().Config().scopeSize), 128, 2048);
+    const int wanted = s_scopeTextureSize ? s_scopeTextureSize : size; // sized once, as the eyes
+    if (!EnsureEyeTarget(s_eyes[kScopeTarget], wanted, wanted, samples))
+        return false;
+    if (s_scopeTexture)
+        return true;
+    glGenTextures(1, &s_scopeTexture);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_scopeTexture);
+    const int levels = 1 + static_cast<int>(std::floor(std::log2(static_cast<float>(wanted))));
+    glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, wanted, wanted);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffers(1, &s_scopeFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_scopeFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_scopeTexture, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+    {
+        LOG_ERROR(Graphics, "VR: sight image {}x{} incomplete (0x{:x})", wanted, wanted, status);
+        return false;
+    }
+    s_scopeTextureSize = wanted;
+    LOG_INFO(Graphics, "VR: sight image {}x{}", wanted, wanted);
+    return true;
+}
+
+// Variable sights (the M21): right stick up zooms in while looking through.
+void UpdateScopeZoom()
+{
+    static auto s_last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(std::chrono::duration<float>(now - s_last).count(), 0.1f);
+    s_last = now;
+    if (!s_scopePasses || s_scopeFovMax <= s_scopeFovMin)
+        return;
+    const float stick = PoseidonVR::VRSession::Instance().Controllers().turnY;
+    if (std::fabs(stick) > 0.3f)
+        s_scopeFov = std::clamp(s_scopeFov * std::exp(-stick * dt), s_scopeFovMin, s_scopeFovMax);
 }
 
 // Manual reload (M6), as gestures with the left hand:
@@ -902,6 +1093,7 @@ void UpdateReload(const float headXr[3])
                 if (s_boltPull >= 0.9f && !s_boltBack)
                 {
                     s_boltBack = true;
+                    PushReloadEvent(Engine::VRReloadBoltBack);
                     vr.Haptic(0, 0.6f, 0.04f);
                 }
             }
@@ -1075,10 +1267,29 @@ void DrawVRTab()
     if (ImGui::Checkbox("Every magazine needs the charging handle", &everyMagazine))
         c.chargeEveryMagazine = everyMagazine ? 1.0f : 0.0f;
     ImGui::SliderFloat("Charge pull (m)", &c.chargePull, 0.02f, 0.15f, "%.2f");
+    ImGui::SliderFloat("Reload sound volume", &c.soundVolume, 0.0f, 2.0f, "%.2f");
+    ImGui::SliderFloat("Magazine in sound start (s)", &c.soundInsertStart, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Magazine in sound end (s)", &c.soundInsertEnd, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Bolt back sound start (s)", &c.soundBoltBackStart, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Bolt back sound end (s)", &c.soundBoltBackEnd, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Bolt forward sound start (s)", &c.soundBoltForwardStart, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Bolt forward sound end (s)", &c.soundBoltForwardEnd, 0.0f, 2.4f, "%.2f");
+    ImGui::SliderFloat("Handgun magazine in start (s)", &c.soundGunInsertStart, 0.0f, 1.65f, "%.2f");
+    ImGui::SliderFloat("Handgun magazine in end (s)", &c.soundGunInsertEnd, 0.0f, 1.65f, "%.2f");
+    ImGui::SliderFloat("Handgun slide back start (s)", &c.soundGunBoltBackStart, 0.0f, 1.65f, "%.2f");
+    ImGui::SliderFloat("Handgun slide back end (s)", &c.soundGunBoltBackEnd, 0.0f, 1.65f, "%.2f");
+    ImGui::SliderFloat("Handgun slide forward start (s)", &c.soundGunBoltForwardStart, 0.0f, 1.65f, "%.2f");
+    ImGui::SliderFloat("Handgun slide forward end (s)", &c.soundGunBoltForwardEnd, 0.0f, 1.65f, "%.2f");
     ImGui::SliderFloat("Magazine in hand ahead (m)", &c.magForward, -0.15f, 0.15f, "%.2f");
     ImGui::SliderFloat("Magazine in hand below (m)", &c.magDown, -0.10f, 0.20f, "%.2f");
     ImGui::SliderFloat("Magazine in hand tilt (deg)", &c.magPitch, -180.0f, 180.0f, "%.0f");
     ImGui::SliderFloat("Magazine model scale", &c.magScale, 0.2f, 3.0f, "%.2f");
+    ImGui::SeparatorText("Telescopic sights");
+    ImGui::SliderFloat("Magnification factor", &c.scopeZoom, 0.1f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Apparent size (tan)", &c.scopeApparent, 0.1f, 0.5f, "%.2f");
+    ImGui::SliderFloat("Eye relief (m)", &c.scopeRelief, 0.02f, 0.2f, "%.3f");
+    ImGui::SliderFloat("Exit pupil (m)", &c.scopePupil, 0.005f, 0.06f, "%.3f");
+    ImGui::SliderFloat("Drawn within (m)", &c.scopeRange, 0.1f, 1.5f, "%.2f");
     ImGui::TextDisabled("Weapon: %s, %d spare, %s%s%s", s_magLoaded ? "magazine in" : "EMPTY", s_magSpares,
                         s_chambered ? "chambered" : "needs charge", s_magInHand ? ", magazine in hand" : "",
                         s_charging ? ", pulling handle" : "");
@@ -1172,6 +1383,17 @@ void EngineGL33::ShutdownVR()
     s_headDropValid = false;
     for (EyeTarget& t : s_eyes)
         DestroyEyeTarget(t);
+    if (s_scopeFbo)
+        glDeleteFramebuffers(1, &s_scopeFbo);
+    if (s_scopeTexture)
+        glDeleteTextures(1, &s_scopeTexture);
+    s_scopeFbo = s_scopeTexture = 0;
+    s_scopeTextureSize = 0;
+    if (s_lensProgram)
+        glDeleteProgram(s_lensProgram);
+    if (s_lensVao)
+        glDeleteVertexArrays(1, &s_lensVao);
+    s_lensProgram = s_lensVao = 0;
     if (_vrBlitFbo)
     {
         glDeleteFramebuffers(1, &_vrBlitFbo);
@@ -1201,10 +1423,11 @@ int EngineGL33::VRScenePassCount()
     }
     // The XR frame is begun: from here it is submitted in SubmitVRFrame even
     // if an eye target fails (that eye then shows nothing).
-    for (EyeTarget& t : s_eyes)
-        EnsureEyeTarget(t, s_frame.eyeWidth, s_frame.eyeHeight, _msaaSamples);
+    for (int i = 0; i < 2; ++i)
+        EnsureEyeTarget(s_eyes[i], s_frame.eyeWidth, s_frame.eyeHeight, _msaaSamples);
     _vrStereoFrame = true;
-    return 2;
+    s_scopePasses = ScopeViewWanted() && EnsureScopeImage(_msaaSamples) ? 1 : 0;
+    return 2 + s_scopePasses;
 }
 
 void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
@@ -1245,11 +1468,30 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
                                  (eyes[0].position[1] + eyes[1].position[1]) * 0.5f,
                                  (eyes[0].position[2] + eyes[1].position[2]) * 0.5f};
         UpdateReload(headXr);
+        UpdateScopeZoom();
     }
 
     // Whatever is still queued belongs to the previous target.
     BeginScreenPass();
     FlushAndFreeAllQueues(_queueNo);
+
+    // The sight's view comes first: the eyes show it in this same frame.
+    if (pass < s_scopePasses)
+    {
+        const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+        Matrix4 sight = s_weaponWorld;
+        sight.SetPosition(ScopeLensCentre());
+        camera.SetTransform(sight);
+        const float halfTan = cfg.scopeApparent * s_scopeFov / floatMax(cfg.scopeZoom, 0.01f);
+        camera.SetPerspective(s_near, s_far, halfTan, halfTan);
+        camera.Adjust(this);
+        s_inScopePass = true;
+        _vrEyeTarget = kScopeTarget;
+        BindFrameRenderTarget();
+        Poseidon::render::clear::ColorDepthStencil();
+        return;
+    }
+    pass -= s_scopePasses;
 
     const PoseidonVR::EyeView& eye = s_frame.eyes[pass];
     PlaceCamera(camera, ToEngineOrientation(eye.orientation), TrackedOffset(eye.position));
@@ -1261,6 +1503,134 @@ void EngineGL33::VRBeginScenePass(int pass, Camera& camera)
     BindFrameRenderTarget();
     // Clear colour is still the fog colour InitDraw set.
     Poseidon::render::clear::ColorDepthStencil();
+}
+
+void EngineGL33::VRSetScope(bool on, Vector3Par eyepiece, float radius, float fovMin, float fovMax)
+{
+    if (on && (!s_scopeOn || fovMin != s_scopeFovMin || fovMax != s_scopeFovMax))
+        s_scopeFov = fovMax; // another weapon: its widest view
+    s_scopeOn = on;
+    if (!on)
+        return;
+    s_scopeEyepiece = eyepiece;
+    s_scopeRadius = radius;
+    s_scopeFovMin = fovMin;
+    s_scopeFovMax = fovMax;
+}
+
+bool EngineGL33::VRHasScope() const
+{
+    return _vrActive && s_scopeOn;
+}
+
+float EngineGL33::VRScopeFov() const
+{
+    return s_scopeFov;
+}
+
+bool EngineGL33::VRScopePass() const
+{
+    return s_inScopePass;
+}
+
+bool EngineGL33::VRBeginScopeReticle()
+{
+    if (!s_inScopePass)
+        return false;
+    BeginScreenPass();
+    FlushAndFreeAllQueues(_queueNo);
+    // 2D coordinates follow the engine's size: the image's, for now.
+    s_scopeSavedW = _w;
+    s_scopeSavedH = _h;
+    _w = _h = s_eyes[kScopeTarget].width;
+    UploadVSScreenConstants();
+    return true;
+}
+
+void EngineGL33::VREndScenePass(Camera& camera)
+{
+    if (!_vrStereoFrame)
+        return;
+    BeginScreenPass();
+    FlushAndFreeAllQueues(_queueNo);
+    if (!s_inScopePass)
+    {
+        DrawVRScopeLens(camera);
+        return;
+    }
+    s_inScopePass = false;
+    _w = s_scopeSavedW;
+    _h = s_scopeSavedH;
+    UploadVSScreenConstants();
+    RawBlitScope raw;
+    const EyeTarget& t = s_eyes[kScopeTarget];
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, t.fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_scopeFbo);
+    glBlitFramebuffer(0, 0, t.width, t.height, 0, 0, t.width, t.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+// The rear lens on an eye, after that eye's scene: depth-tested against it,
+// so a hand or the weapon's own parts in front still cover the lens.
+void EngineGL33::DrawVRScopeLens(const Camera& camera)
+{
+    if (!s_scopeOn || !s_weaponValid || !EnsureLensProgram())
+        return;
+    const Vector3 centre = ScopeLensCentre();
+    const Vector3 toEye = camera.Position() - centre;
+    const Vector3 sightAside = s_weaponWorld.DirectionAside();
+    const Vector3 sightUp = s_weaponWorld.DirectionUp();
+    const Vector3 sightForward = s_weaponWorld.Direction();
+    const float eye[3] = {toEye.DotProduct(sightAside), toEye.DotProduct(sightUp), toEye.DotProduct(sightForward)};
+    if (eye[2] >= -0.005f) // in front of the lens: it faces away
+        return;
+
+    auto toView = [&](Vector3Par v, float out[3])
+    {
+        out[0] = v.DotProduct(camera.DirectionAside());
+        out[1] = v.DotProduct(camera.DirectionUp());
+        out[2] = v.DotProduct(camera.Direction());
+    };
+    float viewCentre[3], viewAside[3], viewUp[3];
+    toView(centre - camera.Position(), viewCentre);
+    toView(sightAside * s_scopeRadius, viewAside);
+    toView(sightUp * s_scopeRadius, viewUp);
+    const Matrix4& proj = camera.ProjectionNormal();
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+
+    RawBlitScope raw;
+    Poseidon::render::depthstencil::Disabled(/*hasStencil*/ false);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glUseProgram(s_lensProgram);
+    glUniform3fv(s_lensCentre, 1, viewCentre);
+    glUniform3fv(s_lensAside, 1, viewAside);
+    glUniform3fv(s_lensUp, 1, viewUp);
+    glUniform4f(s_lensProj, proj(0, 0), proj(0, 2), proj(1, 1), proj(1, 2));
+    glUniform2f(s_lensDepth, proj(2, 2), proj.Position()[2]);
+    glUniform3fv(s_lensEye, 1, eye);
+    glUniform1f(s_lensRadius, s_scopeRadius);
+    glUniform3f(s_lensOptics, cfg.scopeApparent, cfg.scopeRelief, cfg.scopePupil);
+    glUniform1f(s_lensLive, s_scopePasses ? 1.0f : 0.0f);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, s_scopeTexture);
+    glBindSampler(0, 0); // unit 0's sampler object would override the texture's filters
+    if (s_scopePasses)
+        glGenerateMipmap(GL_TEXTURE_2D);
+    glBindVertexArray(s_lensVao);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindSampler(0, _samplerObjects[0]);
+    glUseProgram(0);
+    // The selectors short-circuit on their cached state: the screen pass
+    // goes on from here.
+    _pixelShaderSel = PSNone;
+    GL33Bind::Invalidate();
+    InvalidatePipelineCache();
+    GL33Bind::Vao(_vaoScreen);
 }
 
 void EngineGL33::VRBeginHUDPass(Camera& camera)
@@ -1418,7 +1788,32 @@ void EngineGL33::VRSetChargeHandle(Vector3Par world, float travel)
 
 float EngineGL33::VRChargePull() const
 {
-    return s_boltPull;
+    // CWR_VR_FAKE_BOLT=<0..1>: holds the handle there (checks the models).
+    static const char* fake = std::getenv("CWR_VR_FAKE_BOLT");
+    return fake ? static_cast<float>(std::atof(fake)) : s_boltPull;
+}
+
+bool EngineGL33::VRReloadSoundPart(int event, bool handgun, float& start, float& end, float& volume) const
+{
+    const PoseidonVR::VRConfig& cfg = PoseidonVR::VRSession::Instance().Config();
+    volume = cfg.soundVolume;
+    switch (event)
+    {
+        case VRReloadInsert:
+            start = handgun ? cfg.soundGunInsertStart : cfg.soundInsertStart;
+            end = handgun ? cfg.soundGunInsertEnd : cfg.soundInsertEnd;
+            return true;
+        case VRReloadBoltBack:
+            start = handgun ? cfg.soundGunBoltBackStart : cfg.soundBoltBackStart;
+            end = handgun ? cfg.soundGunBoltBackEnd : cfg.soundBoltBackEnd;
+            return true;
+        case VRReloadCharge:
+            start = handgun ? cfg.soundGunBoltForwardStart : cfg.soundBoltForwardStart;
+            end = handgun ? cfg.soundGunBoltForwardEnd : cfg.soundBoltForwardEnd;
+            return true;
+        default:
+            return false;
+    }
 }
 
 int EngineGL33::VRTakeReloadEvent()
@@ -1572,6 +1967,22 @@ void EngineGL33::SubmitVRStereoFrame()
         glBindFramebuffer(GL_READ_FRAMEBUFFER, t.resolveFbo);
         glBlitFramebuffer(0, 0, t.width, t.height, rect[0], rect[1], rect[2], rect[3], GL_COLOR_BUFFER_BIT,
                           GL_LINEAR);
+    }
+    // Test aid (CWR_VR_SHOW_HUD=1): the HUD layer in the window's corner.
+    static const bool showHud = std::getenv("CWR_VR_SHOW_HUD") != nullptr;
+    if (showHud)
+    {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, SSAAActive() ? _ssaaResolveFbo : 0);
+        glBlitFramebuffer(0, 0, SSAAActive() ? _ssaaW : winW, SSAAActive() ? _ssaaH : winH, winW / 2, 0, winW, winH / 2,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
+    // Test aid (CWR_VR_SHOW_SCOPE=1): the sight's image, 1:1, in the window's corner.
+    static const bool showScope = std::getenv("CWR_VR_SHOW_SCOPE") != nullptr;
+    if (showScope && s_scopeFbo)
+    {
+        const int size = s_scopeTextureSize;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, s_scopeFbo);
+        glBlitFramebuffer(0, 0, size, size, winW - size, 0, winW, size, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 

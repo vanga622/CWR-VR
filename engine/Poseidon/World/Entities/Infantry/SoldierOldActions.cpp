@@ -224,6 +224,7 @@ void Soldier::KeyboardPilot(float deltaT, SimulationImportance prec)
     {
         // VR: the quick reload button leaves the weapon ready to fire.
         _vrChambered = true;
+        _vrBoltLocked = false;
         if (DisableWeaponsLong())
         {
             if (_currentWeapon < 0)

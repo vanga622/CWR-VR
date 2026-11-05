@@ -23,13 +23,18 @@ bool VRPrepareWeaponMagazine( LODShapeWithShadow *weaponShape, const MagazineTyp
 void VRShowWeaponMagazine( LODShapeWithShadow *weaponShape, int level, bool show, const char *selection = "vr_magazine" );
 // VR (M6): draws only the weapon model's magazine piece at a magazine frame
 // (z its top, y across); false when the model has none known.
-bool VRDrawWeaponMagazine( Object *owner, LODShapeWithShadow *weapon, const Matrix4 &magFrame, float z2, const LightList &lights );
+bool VRDrawWeaponMagazine( Object *owner, LODShapeWithShadow *weapon, const Matrix4 &magFrame, bool rounds, float z2, const LightList &lights );
 bool VRHasWeaponMagazine( const LODShapeWithShadow *weapon );
 bool VRWeaponNeedsPreparing( const LODShapeWithShadow *weapon );
 // VR (M6): the weapon model's charging handle on this level (centre in model
 // space, travel in metres); false when the level has none.  VRDrawWeaponBolt
 // draws only the handle, moved back that far along the weapon.
 bool VRWeaponBolt( const LODShapeWithShadow *weapon, int level, Vector3 &centre, float &travel );
+bool VRWeaponBoltMotion( const LODShapeWithShadow *weapon, bool &reciprocates, bool &locksBack );
+bool VRWeaponBoltIsPart( const LODShapeWithShadow *weapon );
+bool VRWeaponHasDustCover( const LODShapeWithShadow *weapon );
+void VRDrawWeaponPort( Object *owner, const LODShapeWithShadow *weapon, const Matrix4 &weaponFrame, float back, float cover, float z2, const LightList &lights );
+float VRMagazineModelScale( const MagazineType *type );
 void VRDrawWeaponBolt( Object *owner, LODShapeWithShadow *weapon, int level, const Matrix4 &weaponFrame, float back, float z2, const LightList &lights );
 DEFINE_ENUM_BEG(MoveId)
 	MoveIdNone=-1
@@ -726,6 +731,8 @@ class Man: public Person
 	) const override;
 
 	void DrawNVOptics() override;
+	void VRReportScope() override;
+	void VRDrawScopeReticle() override;
 	void DrawCameraCockpit() override;
 
 	int PassNum( int lod ) override;
@@ -980,14 +987,24 @@ class Man: public Person
 	// (charge_every_magazine; else only after firing dry) (_vrChambered).
 	void VRReloadStep();
 	void VRDrawMagazineInHand( int level, float z2, const LightList &lights );
+	// VR (M6): the part of the reload sound for this event, cut off at its end.
+	void VRPlayReloadSoundPart( int event, const MuzzleType *muzzle );
+	void VRReloadSoundStep();
+	float VRBoltPosition( const LODShapeWithShadow *weapon, bool carrier ) const;
 	// VR (M6): true when the player's weapon in this slot is reloaded by hand
 	// (a detachable box magazine); other feeds keep the game's reload.
 	bool VRHandReloads( int weapon ) const override;
 	// VR (M6): spawns the magazine falling from where the last event left it.
-	void VRDropMagazine( const MagazineType *type );
+	void VRDropMagazine( const MagazineType *type, bool rounds );
 	Ref<Magazine> _vrHandMag; // the magazine in the left hand (still in _magazines)
+	Ref<IWave> _vrSoundPart; // the part of the reload sound playing
+	float _vrSoundEnd = 0.0f, _vrSoundVolume = 0.0f, _vrSoundFreq = 1.0f;
 	int _vrReportedWeapon = -1;
 	bool _vrChambered = true;
+	bool _vrBoltLocked = false; // fired dry: a bolt that locks back stays there
+	// The weapon whose dust cover the bolt has opened, and when (only compared).
+	const LODShapeWithShadow *_vrCoverOpenOn = nullptr;
+	Foundation::UITime _vrCoverOpenTime = UITIME_MIN;
 	// VR (M5): arm bones follow the weapon in the controller.
 	bool VRArmsTransform( Matrix4 &right, Matrix4 &left ) const;
 	int VRArmBones( BlendAnimInfo *out, bool leftArm ) const;

@@ -423,11 +423,13 @@ class Engine : public IGraphicsEngine
         VRReloadTake,   // left hand took a magazine from the pouch
         VRReloadStow,   // magazine in hand let go at the pouch (or the hand was interrupted)
         VRReloadDrop,   // magazine in hand let go elsewhere: it falls
+        VRReloadBoltBack, // charging handle reached the end of its travel
     };
     // VR: World reports each frame whether a dialog is open (UI pointer on).
     virtual void VRSetDialogOpen(bool /*open*/) {}
 
     virtual bool VRManualReload() const { return false; }
+    virtual bool VRRunning() const { return false; } // VR: a headset takes the frames
     // weaponKey changes when the soldier switches weapon (a magazine in the
     // hand goes back to the pouch).
     virtual void VRSetMagazineState(bool /*loaded*/, int /*spares*/, bool /*chambered*/, int /*weaponKey*/) {}
@@ -440,6 +442,10 @@ class Engine : public IGraphicsEngine
     virtual void VRSetChargeHandle(Vector3Par /*world*/, float /*travel*/) {}
     // VR: how far the charging handle is back, 0 (forward) to 1 (fully back).
     virtual float VRChargePull() const { return 0.0f; }
+    // VR: which part of the reload sound goes with this event (VRReloadInsert,
+    // VRReloadBoltBack, VRReloadCharge): seconds into the wave, volume factor.
+    // Rifles and handguns have different recordings.
+    virtual bool VRReloadSoundPart(int /*event*/, bool /*handgun*/, float& /*start*/, float& /*end*/, float& /*volume*/) const { return false; }
     // VR: where the magazine of the event last taken was (world, magazine
     // model axes: +Z its top, +Y across) and how fast it moved (m/s).
     virtual bool VRReloadEventPose(Matrix4& /*world*/, Vector3& /*velocity*/) const { return false; }
@@ -455,6 +461,19 @@ class Engine : public IGraphicsEngine
     // VR (M6): world pose (may carry a scale) of the magazine the left hand
     // took from the pouch; false while the hand holds none.
     virtual bool VRMagazineInHandPose(Matrix4& /*world*/) const { return false; }
+    // VR: telescopic sight of the weapon in hand, reported every frame.
+    // eyepiece: centre of the rear lens in the weapon's frame (x aside, y up,
+    // z along the barrel), metres; radius: of that lens; fovMin/fovMax: the
+    // weapon's zoom range as the game's field of view.
+    virtual void VRSetScope(bool /*on*/, Vector3Par /*eyepiece*/, float /*radius*/, float /*fovMin*/, float /*fovMax*/) {}
+    virtual bool VRHasScope() const { return false; }
+    virtual float VRScopeFov() const { return 0.0f; } // the zoom selected, as the game's field of view
+    virtual bool VRScopePass() const { return false; } // this scene pass is the view through the sight
+    // VR: after the scene of a pass.  True when the sight's reticle is to be
+    // drawn now (2D, into the sight's image), then VREndScenePass finishes
+    // the pass: the sight's image is ready, or the lens goes on the eye.
+    virtual bool VRBeginScopeReticle() { return false; }
+    virtual void VREndScenePass(Camera& /*camera*/) {}
     void Pause() override = 0;   // stop and prepare everything for GDI
     void Restore() override = 0; // restore after minimized - before app goes to fullscreen
     virtual void StopAll() {}    // stop all background activity - used before termination

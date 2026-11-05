@@ -598,6 +598,7 @@ class EngineGL33 : public Engine
     // Eye render target, bound by BindFrameRenderTarget during an eye pass.
     void BindVREyeTarget();
     void VREyeTargetSize(int& w, int& h) const;
+    void DrawVRScopeLens(const Camera& camera);
     bool _vrActive = false;
     bool _vrStereoFrame = false;    // this frame was drawn per eye
     bool _vrFrameAttempted = false; // VRScenePassCount ran this frame
@@ -620,12 +621,20 @@ class EngineGL33 : public Engine
     bool VRChargeEveryMagazine() const override;
     void VRSetChargeHandle(Vector3Par world, float travel) override;
     float VRChargePull() const override;
+    bool VRReloadSoundPart(int event, bool handgun, float& start, float& end, float& volume) const override;
     int VRTakeReloadEvent() override;
     bool VRReloadEventPose(Matrix4& world, Vector3& velocity) const override;
     bool VRWeaponTwoHanded() const override;
     bool VRHandPose(int hand, Matrix4& world) const override;
     float VRForeEndForward() const override;
     bool VRMagazineInHandPose(Matrix4& world) const override;
+    bool VRRunning() const override { return _vrActive; }
+    void VRSetScope(bool on, Vector3Par eyepiece, float radius, float fovMin, float fovMax) override;
+    bool VRHasScope() const override;
+    float VRScopeFov() const override;
+    bool VRScopePass() const override;
+    bool VRBeginScopeReticle() override;
+    void VREndScenePass(Camera& camera) override;
 
   protected:
 

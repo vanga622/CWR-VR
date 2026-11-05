@@ -958,7 +958,11 @@ bool Soldier::FireWeapon(int weapon, TargetType* target)
         base::FireWeapon(weapon, target);
         // VR: fired dry - the bolt locks back, the next magazine needs a charge.
         if (magazine->_ammo <= 0)
+        {
             _vrChambered = false;
+            _vrBoltLocked = true;
+            LOG_INFO(Graphics, "VR: fired dry, bolt held back");
+        }
         return true;
     }
     return false;

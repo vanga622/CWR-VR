@@ -2,6 +2,7 @@
 #include <Poseidon/World/Entities/Vehicles/Transport.hpp>
 #include <Poseidon/AI/AI.hpp>
 #include <Poseidon/World/Entities/Infantry/Person.hpp>
+#include <Poseidon/Graphics/Core/Engine.hpp>
 #include <Poseidon/World/World.hpp>
 #include <Poseidon/Network/Network.hpp>
 #include <Poseidon/Network/NetworkCustomAssets.hpp>
@@ -134,6 +135,11 @@ bool Person::IsNVWanted() const
 void Person::SetNVWanted(bool set) {}
 
 void Person::DrawNVOptics() {}
+
+void Person::VRReportScope()
+{
+    GEngine->VRSetScope(false, VZero, 0.0f, 0.0f, 0.0f); // VR: no weapon of his own
+}
 
 void Person::Simulate(float deltaT, SimulationImportance prec)
 {

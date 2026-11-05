@@ -419,6 +419,9 @@ void World::Simulate(float deltaT, bool& enableDraw)
             {
                 enableOptics = camAI->GetOpticsModel(person) != nullptr;
                 forceOptics = camAI->GetForceOptics(person);
+                // VR: a telescopic sight is looked through on the weapon itself.
+                if (GEngine->VRHasScope())
+                    enableOptics = false;
             }
         }
     }
@@ -1375,6 +1378,14 @@ void World::Simulate(float deltaT, bool& enableDraw)
 
     // VR: the 3D scene is drawn once per eye in a stereo frame; flat play
     // and frames without stereo draw it once, as before.
+    // VR: the weapon in hand may add a pass, the view through its sight.
+    if (enableDraw && GEngine->VRRunning())
+    {
+        if (person)
+            person->VRReportScope();
+        else
+            GEngine->VRSetScope(false, VZero, 0.0f, 0.0f, 0.0f);
+    }
     const int scenePasses = enableDraw ? GEngine->VRScenePassCount() : 1;
     for (int scenePass = 0; scenePass < scenePasses; ++scenePass)
     {
@@ -1586,6 +1597,14 @@ void World::Simulate(float deltaT, bool& enableDraw)
             {
                 _scene.CleanUp();
             }
+        }
+
+        // VR: the reticle goes on the sight's image, the lens on the eyes.
+        if (enableDraw)
+        {
+            if (GEngine->VRBeginScopeReticle() && person)
+                person->VRDrawScopeReticle();
+            GEngine->VREndScenePass(*_scene.GetCamera());
         }
     }
 

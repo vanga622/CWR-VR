@@ -71,12 +71,37 @@ struct VRConfig
     float chargeRadius = 0.12f;
     float chargePull = 0.06f;    // pull back this far to charge (weapons with no handle of their own)
     float chargeEveryMagazine = 1.0f; // 1 = every magazine needs the handle, 0 = only after firing dry
+    // Parts of the reload sound, seconds: rifles weapons\m16load (2.38 s),
+    // handguns: reload_gun of the O addon (1.65 s).
+    float soundVolume = 1.0f;
+    float soundInsertStart = 1.26f;
+    float soundInsertEnd = 1.64f;
+    float soundBoltBackStart = 1.86f;
+    float soundBoltBackEnd = 2.05f;
+    float soundBoltForwardStart = 2.06f;
+    float soundBoltForwardEnd = 2.30f;
+    float soundGunInsertStart = 0.44f;
+    float soundGunInsertEnd = 0.72f;
+    float soundGunBoltBackStart = 1.10f;
+    float soundGunBoltBackEnd = 1.27f;
+    float soundGunBoltForwardStart = 1.28f;
+    float soundGunBoltForwardEnd = 1.46f;
     // Magazine drawn in the left hand (game model of the magazine), placed
     // in the hand's frame (+Z = controller ray), metres and degrees.
     float magForward = 0.02f;
     float magDown = 0.0f;
     float magPitch = 20.0f;      // forward tilt of the top; 180 turns it upside down
     float magScale = 1.0f;
+    // Telescopic sights: the view is drawn into an image on the rear lens.
+    // The image sits at infinity, so it holds still as the head moves, and
+    // only an eye at the exit pupil (scope_relief behind the lens, scope_pupil
+    // off the axis at most) sees it, as in a real sight.
+    float scopeSize = 512.0f;    // image size, pixels (next start)
+    float scopeZoom = 0.5f;      // magnification = scope_zoom / the game's field of view
+    float scopeApparent = 0.25f; // half size of the image as seen by the eye, tan(angle)
+    float scopeRelief = 0.08f;   // eye relief, metres
+    float scopePupil = 0.02f;    // exit pupil radius, metres
+    float scopeRange = 0.5f;     // the view is only drawn with the head this close, metres
 };
 
 // Controller state from the OpenXR actions (Touch layout), refreshed every

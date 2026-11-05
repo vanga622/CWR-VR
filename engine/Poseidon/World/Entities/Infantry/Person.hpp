@@ -74,6 +74,10 @@ class Person: public VehicleSupply
 	virtual bool IsNVWanted() const;
 	virtual void SetNVWanted(bool set = true);
 	virtual void DrawNVOptics();
+	// VR: reports the telescopic sight of the weapon in hand to the engine,
+	// and draws its reticle into the sight's image.
+	virtual void VRReportScope();
+	virtual void VRDrawScopeReticle() {}
 
 	void CheckAmmo
 	(
