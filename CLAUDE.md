@@ -20,6 +20,8 @@ Full room-scale VR for infantry play: stereo rendering with head tracking, motio
 cmake --preset win-x64-clang-rwdi
 cmake --build build/win-x64-clang-rwdi
 ```
+Or `build.bat` and `play.bat` (`scripts/cwr.ps1`): they find CMake, use the local preset from `CMakeUserPresets.json`, and start the game from `data_dir`. `play.bat --flat` runs without VR.
+
 Game data: the owner's Steam install of Arma: Cold War Assault Remastered (v3.05). Ask the owner for the path once and store it in `vr.local.ini` (git-ignored).
 
 ## Where things live

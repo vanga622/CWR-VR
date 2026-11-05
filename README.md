@@ -39,28 +39,33 @@
 | **OpenXR** | A runtime with `XR_KHR_opengl_enable` |
 | **Game data** | Your own Steam install of the game, v3.05 ([free Demo data](#game-data) also exists) |
 
-## Build
+## Quick start
+
+1. Install the build tools: Visual Studio with the C++ CMake tools, LLVM (`clang-cl`) and [vcpkg](https://vcpkg.io), with `VCPKG_ROOT` pointing at the vcpkg folder.
+2. Double-click **`build.bat`**. The first build takes a while.
+3. Start Virtual Desktop or SteamVR, and connect your headset.
+4. Double-click **`play.bat`**. The first time, paste the game folder from Steam (**Manage > Browse local files**). It is saved in `vr.local.ini`, so you only do this once.
+
+To play on the monitor without a headset, run `play.bat --flat`.
+
+### Launch options
+
+`play.bat` passes any extra options on to the game:
+
+| Option | What it does |
+|---|---|
+| `--flat` | Starts the game on the monitor, without VR |
+| `--vr-fake` | VR without a headset, using scripted poses |
+| `--vr-mirror` | Shows both eyes side by side in the window |
+
+### Building by hand
 
 ```sh
 cmake --preset win-x64-clang-rwdi
 cmake --build build/win-x64-clang-rwdi
 ```
 
-The game and `vr.pbo` land in `dist/x64-win-rwdi/`.
-
-## Run
-
-Start your OpenXR runtime, then run the game with the game data folder as the working directory:
-
-```sh
-PoseidonGame.exe --vr
-```
-
-| Flag | What it does |
-|---|---|
-| `--vr` | Shows the game in the headset through OpenXR |
-| `--vr-fake` | VR without a headset, using scripted poses (implies `--vr`) |
-| `--vr-mirror` | Shows both eyes side by side in the window |
+The game and `vr.pbo` land in `dist/x64-win-rwdi/`. Run `PoseidonGame.exe --vr` with the game's `Remastered` folder as the working directory.
 
 ## Controls
 
