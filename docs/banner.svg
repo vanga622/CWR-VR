@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-label="CWR-VR: native room-scale VR for the Poseidon engine">
+  <!-- CWR-VR banner. Original artwork, GPL-3.0-or-later. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#10181a"/>
+      <stop offset="0.68" stop-color="#1c2a26"/>
+      <stop offset="1" stop-color="#2d3b2c"/>
+    </linearGradient>
+    <linearGradient id="visor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#26332f"/>
+      <stop offset="1" stop-color="#0d1312"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#c9d6a3" stroke-opacity="0.05" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="320" fill="url(#sky)"/>
+  <rect width="1280" height="320" fill="url(#grid)"/>
+
+  <!-- Ridge line -->
+  <path d="M0 268 L120 236 L230 254 L360 214 L500 250 L640 226 L790 258 L930 220 L1070 252 L1190 230 L1280 246 V320 H0 Z" fill="#16201c"/>
+  <path d="M0 296 L170 274 L340 292 L560 268 L760 294 L980 272 L1140 290 L1280 276 V320 H0 Z" fill="#0e1513"/>
+
+  <!-- Headset -->
+  <g transform="translate(1040 152)">
+    <path d="M-176 -8 C-214 -62 -100 -104 0 -104 C100 -104 214 -62 176 -8" fill="none" stroke="#c9d6a3" stroke-opacity="0.35" stroke-width="10" stroke-linecap="round"/>
+    <rect x="-168" y="-72" width="336" height="146" rx="46" fill="url(#visor)" stroke="#c9d6a3" stroke-width="4"/>
+    <path d="M-30 74 C-22 44 22 44 30 74" fill="#10181a" stroke="#c9d6a3" stroke-width="4"/>
+    <!-- Reticle in each eye -->
+    <g fill="none" stroke="#e9a13b" stroke-width="3">
+      <circle cx="-78" cy="-2" r="42"/>
+      <circle cx="78" cy="-2" r="42"/>
+      <path d="M-132 -2H-92M-64 -2H-24M-78 -56V-16M-78 12V52"/>
+      <path d="M24 -2H64M92 -2H132M78 -56V-16M78 12V52"/>
+    </g>
+    <circle cx="-78" cy="-2" r="3.5" fill="#e9a13b"/>
+    <circle cx="78" cy="-2" r="3.5" fill="#e9a13b"/>
+  </g>
+
+  <!-- Title -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
+    <text x="72" y="150" font-size="104" font-weight="800" letter-spacing="2" fill="#eef2e0">CWR<tspan fill="#e9a13b">-VR</tspan></text>
+    <text x="76" y="198" font-size="29" font-weight="500" fill="#c9d6a3">Native room-scale VR for the Poseidon engine</text>
+    <text x="76" y="236" font-size="18" fill="#93a48b" letter-spacing="1">OPENXR  ·  MOTION CONTROLLERS  ·  HAND-HELD WEAPONS  ·  MANUAL RELOAD</text>
+  </g>
+</svg>
